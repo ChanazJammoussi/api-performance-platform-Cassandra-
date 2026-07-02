@@ -1,0 +1,11 @@
+id: bad_deploy
+description: "Bad deploy - deploy event suivi d'une regression de latence"
+
+faults:
+  - service: orders
+    type: latency_step
+    target_endpoint: "GET /orders/{order_id}"
+    params:
+      latency_ms: 500
+    duration_seconds: 90
+    wait_before_seconds: 15

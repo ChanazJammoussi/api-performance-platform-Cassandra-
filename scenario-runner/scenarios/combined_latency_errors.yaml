@@ -1,0 +1,19 @@
+id: combined_latency_errors
+description: "Latence + erreurs simultanees sur orders et payments"
+
+faults:
+  - service: orders
+    type: latency_step
+    target_endpoint: "GET /orders/{order_id}"
+    params:
+      latency_ms: 400
+    duration_seconds: 60
+    wait_before_seconds: 5
+
+  - service: payments
+    type: error_burst
+    target_endpoint: "POST /payments"
+    params:
+      error_rate: 0.4
+    duration_seconds: 60
+    wait_before_seconds: 0

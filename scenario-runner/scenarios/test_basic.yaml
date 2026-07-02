@@ -1,0 +1,19 @@
+id: test_basic
+description: "Scenario de validation du runner"
+
+faults:
+  - service: orders
+    type: latency_step
+    target_endpoint: "GET /orders/{order_id}"
+    params:
+      latency_ms: 300
+    duration_seconds: 20
+    wait_before_seconds: 5
+
+  - service: payments
+    type: error_burst
+    target_endpoint: "POST /payments"
+    params:
+      error_rate: 0.5
+    duration_seconds: 20
+    wait_before_seconds: 10

@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# Données locales
+*.json
+!scenario-runner/ground_truth_test.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env

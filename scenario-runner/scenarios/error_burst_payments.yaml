@@ -1,0 +1,11 @@
+id: error_burst_payments
+description: "Burst d'erreurs sur payments - simule une dependance cassee"
+
+faults:
+  - service: payments
+    type: error_burst
+    target_endpoint: "POST /payments"
+    params:
+      error_rate: 0.7
+    duration_seconds: 60
+    wait_before_seconds: 5

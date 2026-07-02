@@ -1,0 +1,11 @@
+id: error_burst_high
+description: "Burst d'erreurs fort sur payments - taux 90%"
+
+faults:
+  - service: payments
+    type: error_burst
+    target_endpoint: "POST /payments"
+    params:
+      error_rate: 0.9
+    duration_seconds: 60
+    wait_before_seconds: 5

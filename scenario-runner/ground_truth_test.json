@@ -1,0 +1,24 @@
+[
+  {
+    "scenario_id": "test_basic",
+    "fault_type": "latency_step",
+    "target_service": "orders",
+    "target_endpoint": "GET /orders/{order_id}",
+    "injected_at": "2026-06-11T08:21:47.244438+00:00",
+    "cleared_at": "2026-06-11T08:22:06.082741+00:00",
+    "magnitude": {
+      "latency_ms": 300
+    }
+  },
+  {
+    "scenario_id": "test_basic",
+    "fault_type": "error_burst",
+    "target_service": "payments",
+    "target_endpoint": "POST /payments",
+    "injected_at": "2026-06-11T08:22:16.206322+00:00",
+    "cleared_at": "2026-06-11T08:22:34.807519+00:00",
+    "magnitude": {
+      "error_rate": 0.5
+    }
+  }
+]

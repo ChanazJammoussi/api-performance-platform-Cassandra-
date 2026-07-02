@@ -1,0 +1,11 @@
+id: latency_step_large
+description: "Latence forte sur orders - magnitude elevee"
+
+faults:
+  - service: orders
+    type: latency_step
+    target_endpoint: "GET /orders/{order_id}"
+    params:
+      latency_ms: 1000
+    duration_seconds: 60
+    wait_before_seconds: 5

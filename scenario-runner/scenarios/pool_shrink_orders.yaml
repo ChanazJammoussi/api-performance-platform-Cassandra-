@@ -1,0 +1,11 @@
+id: pool_shrink_orders
+description: "Reduction du connection pool - simule une saturation DB"
+
+faults:
+  - service: orders
+    type: pool_shrink
+    target_endpoint: "GET /orders/{order_id}"
+    params:
+      pool_max: 1
+    duration_seconds: 90
+    wait_before_seconds: 10

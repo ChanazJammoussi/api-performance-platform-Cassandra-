@@ -1,0 +1,12 @@
+id: latency_creep_slow
+description: "Montee tres graduelle de latence - difficile a detecter"
+
+faults:
+  - service: orders
+    type: latency_creep
+    target_endpoint: "GET /orders/{order_id}"
+    params:
+      target_ms: 400
+      duration_minutes: 3
+    duration_seconds: 180
+    wait_before_seconds: 10

@@ -1,0 +1,95 @@
+services:
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: cassandra-timescaledb
+    environment:
+      POSTGRES_USER: cassandra
+      POSTGRES_PASSWORD: cassandra
+      POSTGRES_DB: cassandra
+    ports:
+      - "5434:5432"
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+      - ./timescaledb/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: cassandra-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--web.enable-remote-write-receiver'
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - timescaledb
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.102.0
+    container_name: cassandra-otel-collector
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./otel-collector/config.yaml:/etc/otel/config.yaml
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "8888:8888"
+    depends_on:
+      - timescaledb
+      - prometheus
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: cassandra-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+  orders:
+    build: ./services/orders
+    container_name: cassandra-orders
+    ports:
+      - "8001:8001"
+    depends_on:
+      - otel-collector
+      - timescaledb
+    environment:
+      - DATABASE_URL=postgresql://cassandra:cassandra@timescaledb:5432/cassandra
+
+  payments:
+    build: ./services/payments
+    container_name: cassandra-payments
+    ports:
+      - "8002:8002"
+    depends_on:
+      - otel-collector
+      - orders
+    environment:
+      - ORDERS_URL=http://orders:8001
+
+  gateway:
+    build: ./services/gateway
+    container_name: cassandra-gateway
+    ports:
+      - "8000:8000"
+    depends_on:
+      - otel-collector
+      - orders
+      - payments
+    environment:
+      - ORDERS_URL=http://orders:8001
+      - PAYMENTS_URL=http://payments:8002
+
+volumes:
+  timescaledb_data:
+  grafana_data:
+  prometheus_data:

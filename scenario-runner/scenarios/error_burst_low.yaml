@@ -1,0 +1,11 @@
+id: error_burst_low
+description: "Burst d'erreurs faible sur payments - taux 20%"
+
+faults:
+  - service: payments
+    type: error_burst
+    target_endpoint: "POST /payments"
+    params:
+      error_rate: 0.2
+    duration_seconds: 60
+    wait_before_seconds: 5

@@ -1,0 +1,11 @@
+id: latency_step_small
+description: "Latence faible sur orders - magnitude faible pour tester la sensibilite"
+
+faults:
+  - service: orders
+    type: latency_step
+    target_endpoint: "GET /orders/{order_id}"
+    params:
+      latency_ms: 100
+    duration_seconds: 60
+    wait_before_seconds: 5

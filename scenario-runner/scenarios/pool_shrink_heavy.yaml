@@ -1,0 +1,11 @@
+id: pool_shrink_heavy
+description: "Saturation totale du connection pool sous charge"
+
+faults:
+  - service: orders
+    type: pool_shrink
+    target_endpoint: "GET /orders/{order_id}"
+    params:
+      pool_max: 1
+    duration_seconds: 120
+    wait_before_seconds: 10

@@ -1,0 +1,12 @@
+id: latency_creep_orders
+description: "Montee graduelle de latence sur orders - simule un memory leak"
+
+faults:
+  - service: orders
+    type: latency_creep
+    target_endpoint: "GET /orders/{order_id}"
+    params:
+      target_ms: 800
+      duration_minutes: 2
+    duration_seconds: 120
+    wait_before_seconds: 10

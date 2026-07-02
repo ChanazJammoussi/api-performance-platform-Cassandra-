@@ -1,0 +1,4 @@
+id: quiet_baseline
+description: "Aucune faute - mesure des faux positifs sous charge normale"
+
+faults: []
