@@ -91,7 +91,6 @@ def set_pending(cur, endpoint_id, signal_type, severity, score, raw_value, layer
             layer           = EXCLUDED.layer,
             pending_count   = 0,
             resolving_count = 0,
-            opened_at       = NULL,
             resolved_at     = NULL,
             updated_at      = %s
     """, (endpoint_id, signal_type, severity, score, raw_value, layer,
@@ -117,12 +116,15 @@ def set_firing(cur, endpoint_id, signal_type, severity, score, raw_value, layer,
             score           = %s,
             raw_value       = %s,
             layer           = %s,
-            opened_at       = COALESCE(opened_at, %s),
+            opened_at       = CASE
+                                  WHEN state = 'resolving' THEN COALESCE(opened_at, %s)
+                                  ELSE %s
+                              END,
             pending_count   = 0,
             resolving_count = 0,
             updated_at      = %s
         WHERE endpoint_id = %s AND signal_type = %s
-    """, (severity, score, raw_value, layer, now, now, endpoint_id, signal_type))
+    """, (severity, score, raw_value, layer, now, now, now, endpoint_id, signal_type))
 
 def set_resolving(cur, endpoint_id, signal_type, now):
     cur.execute("""

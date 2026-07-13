@@ -38,14 +38,18 @@ def _load_all_injections():
     Retourne une liste de dicts normalises.
     """
     injections = []
-    pattern = os.path.join(RESULTS_DIR, "*.json")
-    for path in glob.glob(pattern):
+    pattern = os.path.join(RESULTS_DIR, "**", "*.json")
+    for path in glob.glob(pattern, recursive=True):
         try:
             with open(path) as f:
                 data = json.load(f)
-            if not isinstance(data, list):
+            if isinstance(data, list):
+                raw_faults = data
+            elif isinstance(data, dict) and "faults" in data:
+                raw_faults = data["faults"]
+            else:
                 continue
-            for entry in data:
+            for entry in raw_faults:
                 injected_at = entry.get("injected_at")
                 cleared_at  = entry.get("cleared_at")
                 if not injected_at or not cleared_at:
