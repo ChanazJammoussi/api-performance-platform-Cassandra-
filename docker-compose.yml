@@ -90,6 +90,41 @@ services:
       - ORDERS_URL=http://orders:8001
       - PAYMENTS_URL=http://payments:8002
 
+  # --- Detection service (3 process : scraper / detector / baseline) ---------
+  scraper:
+    build: ./detection-service
+    container_name: cassandra-scraper
+    command: ["python", "-u", "scraper.py"]
+    depends_on:
+      - timescaledb
+      - prometheus
+    environment:
+      - DATABASE_URL=postgresql://cassandra:cassandra@timescaledb:5432/cassandra
+      - PROMETHEUS_URL=http://prometheus:9090
+
+  detector:
+    build: ./detection-service
+    container_name: cassandra-detector
+    command: ["python", "-u", "detector.py"]
+    depends_on:
+      - timescaledb
+    environment:
+      - DATABASE_URL=postgresql://cassandra:cassandra@timescaledb:5432/cassandra
+      - GROUND_TRUTH_DIR=/data/results
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+    volumes:
+      - ./scenario-runner/results:/data/results:ro
+
+  baseline:
+    build: ./detection-service
+    container_name: cassandra-baseline
+    command: ["python", "-u", "baseline_job.py", "--loop", "--interval", "3600"]
+    depends_on:
+      - timescaledb
+    environment:
+      - DATABASE_URL=postgresql://cassandra:cassandra@timescaledb:5432/cassandra
+
 volumes:
   timescaledb_data:
   grafana_data:

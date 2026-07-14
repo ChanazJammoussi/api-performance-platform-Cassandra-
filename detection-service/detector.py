@@ -1,3 +1,4 @@
+import os
 import time
 import math
 import logging
@@ -49,7 +50,7 @@ def _transition_line(state, endpoint_id, p99=None, err=None, score=None, count=N
     return f"{tag}{pad}{endpoint_id:<32s}{m}"
 
 
-DB_URL = "postgresql://cassandra:cassandra@localhost:5434/cassandra"
+DB_URL = os.environ.get("DATABASE_URL", "postgresql://cassandra:cassandra@localhost:5434/cassandra")
 
 PENDING_WINDOWS = 2    # cycles avant FIRING
 RESOLVING_WINDOWS = 2  # cycles avant OK

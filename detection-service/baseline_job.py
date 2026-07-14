@@ -14,6 +14,7 @@ Lancement : python baseline_job.py          (run-once)
 """
 
 import argparse
+import os
 import logging
 import time
 import psycopg2
@@ -21,7 +22,7 @@ import psycopg2
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-DB_URL = "postgresql://cassandra:cassandra@localhost:5434/cassandra"
+DB_URL = os.environ.get("DATABASE_URL", "postgresql://cassandra:cassandra@localhost:5434/cassandra")
 
 # Nombre minimum de samples par bucket pour que le quantile soit fiable
 MIN_SAMPLES = 10

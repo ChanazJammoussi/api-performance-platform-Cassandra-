@@ -1,3 +1,4 @@
+import os
 import time
 import logging
 import requests
@@ -7,8 +8,10 @@ from datetime import datetime, timezone
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-PROMETHEUS_URL = "http://127.0.0.1:9090"
-DB_URL = "postgresql://cassandra:cassandra@localhost:5434/cassandra"
+# Surchargeable via l'environnement pour tourner en conteneur (service names)
+# ou sur l'hote (defauts localhost). Voir docker-compose.yml.
+PROMETHEUS_URL = os.environ.get("PROMETHEUS_URL", "http://127.0.0.1:9090")
+DB_URL = os.environ.get("DATABASE_URL", "postgresql://cassandra:cassandra@localhost:5434/cassandra")
 
 ENDPOINTS = [
     {"service": "orders",   "route": "/orders/{order_id}", "method": "GET"},
