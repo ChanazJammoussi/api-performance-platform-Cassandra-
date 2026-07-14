@@ -12,6 +12,10 @@ SERVICES = {
     "payments": "http://localhost:8002",
 }
 
+# Repertoire des ground truth JSON, resolu par rapport a l'emplacement de ce
+# fichier (et non au CWD) pour que le correlator les retrouve toujours.
+RESULTS_DIR = Path(__file__).resolve().parent / "results"
+
 # Fenetre exacte utilisee par scraper.py dans ses requetes Prometheus rate([5m]).
 # Apres cleared_at d'une injection, les erreurs restent presentes dans cette
 # fenetre et peuvent faire fire le detecteur. Attendre ce delai entre deux runs
@@ -35,13 +39,18 @@ def _write_output(output_file: str, duration_override, faults: list):
         json.dump(output, f, indent=2)
 
 
-async def run_scenario(scenario_file: str, output_file: str, duration_override: int | None = None):
+async def run_scenario(scenario_file: str, output_file: str | None = None, duration_override: int | None = None):
     with open(scenario_file) as f:
         scenario = yaml.safe_load(f)
 
     scenario_id = scenario.get("id", Path(scenario_file).stem)
     faults = scenario.get("faults", [])
     ground_truth = []
+
+    if output_file is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        output_file = str(RESULTS_DIR / f"{scenario_id}_{timestamp}.json")
 
     print(f"Running scenario: {scenario_id}")
     print(f"Total faults: {len(faults)}")
@@ -106,7 +115,7 @@ async def run_scenario(scenario_file: str, output_file: str, duration_override: 
 def main():
     parser = argparse.ArgumentParser(description="Cassandra scenario runner")
     parser.add_argument("scenario", help="Path to scenario YAML file")
-    parser.add_argument("--output", default="ground_truth.json", help="Output ground-truth log file")
+    parser.add_argument("--output", default=None, help="Output ground-truth log file (default: results/{scenario_id}_{timestamp}.json)")
     parser.add_argument(
         "--duration-override",
         type=int,

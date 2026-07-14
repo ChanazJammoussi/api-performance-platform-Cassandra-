@@ -103,8 +103,8 @@ def write_features(conn, now, p50, p95, p99, rps, err5xx, err4xx):
             p50.get(key),
             p95.get(key),
             p99.get(key),
-            err5xx.get(key),
-            err4xx.get(key),
+            err5xx.get(key, 0.0),
+            err4xx.get(key, 0.0),
         )
 
         cur.execute("""

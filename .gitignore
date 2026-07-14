@@ -15,3 +15,18 @@ Thumbs.db
 
 # Secrets
 .env
+
+# Logs et processus
+*.log
+*.pid
+
+# Résultats de campagne
+scenario-runner/results/
+
+# Scripts de diagnostic locaux
+check_*.py
+analyze_fp.py
+measure_noise.py
+noise_history.py
+test_cause*.py
+test_suite_imports.py

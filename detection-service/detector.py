@@ -79,9 +79,9 @@ def set_pending(cur, endpoint_id, signal_type, severity, score, raw_value, layer
     cur.execute("""
         INSERT INTO alerts
             (endpoint_id, signal_type, state, severity, score, raw_value, layer,
-             pending_count, resolving_count, opened_at, resolved_at, updated_at)
+             pending_count, resolving_count, opened_at, resolved_at, pending_since, updated_at)
         VALUES (%s, %s, 'pending', %s, %s, %s, %s,
-                0, 0, NULL, NULL, %s)
+                0, 0, NULL, NULL, %s, %s)
         ON CONFLICT (endpoint_id, signal_type)
         DO UPDATE SET
             state           = 'pending',
@@ -92,9 +92,10 @@ def set_pending(cur, endpoint_id, signal_type, severity, score, raw_value, layer
             pending_count   = 0,
             resolving_count = 0,
             resolved_at     = NULL,
+            pending_since   = COALESCE(alerts.pending_since, EXCLUDED.pending_since),
             updated_at      = %s
     """, (endpoint_id, signal_type, severity, score, raw_value, layer,
-          now, now))
+          now, now, now))
 
 def increment_pending(cur, endpoint_id, signal_type, severity, score, raw_value, layer, now):
     cur.execute("""
@@ -143,6 +144,7 @@ def set_ok(cur, endpoint_id, signal_type, now):
             resolved_at     = %s,
             pending_count   = 0,
             resolving_count = 0,
+            pending_since   = NULL,
             updated_at      = %s
         WHERE endpoint_id = %s AND signal_type = %s
     """, (now, now, endpoint_id, signal_type))

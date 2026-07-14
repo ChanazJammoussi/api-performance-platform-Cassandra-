@@ -34,7 +34,7 @@ load_dotenv()
 
 log = logging.getLogger(__name__)
 
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.1-flash-lite"
 HISTORY_WINDOW_HOURS = 48
 HISTORY_LIMIT = 5
 

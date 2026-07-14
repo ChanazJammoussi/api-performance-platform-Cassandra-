@@ -25,10 +25,14 @@ log = logging.getLogger(__name__)
 # Fenetre causale : on cherche des injections dans [onset - CAUSAL_WINDOW, onset + CAUSAL_WINDOW]
 CAUSAL_WINDOW_MINUTES = 30
 
-# Repertoire des ground truth JSON (relatif au CWD ou absolu)
+# Repertoire des ground truth JSON, resolu par rapport a l'emplacement de ce
+# fichier (et non au CWD). Surcharges possible via GROUND_TRUTH_DIR.
 RESULTS_DIR = os.environ.get(
     "GROUND_TRUTH_DIR",
-    "/mnt/c/Users/chana/cassandra/scenario-runner/results"
+    os.path.abspath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..", "scenario-runner", "results"
+    ))
 )
 
 
