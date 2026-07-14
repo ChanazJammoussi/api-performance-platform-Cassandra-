@@ -174,18 +174,26 @@ def process_signal(cur, endpoint_id, signal_type, anomaly, severity, score, raw_
                 set_firing(cur, endpoint_id, signal_type, severity, score, raw_value, layer, now)
                 new_state = "firing"
                 prev = "pending"
-                send_slack_alert(endpoint_id, signal_type, severity, score, raw_value)
+                # L'ordre est important : la correlation et l'explication doivent etre
+                # calculees AVANT la notification pour que le message Slack porte la
+                # cause suspectee et l'explication LLM. Chaque etape est best-effort :
+                # une panne de correlation ou du LLM ne doit jamais bloquer l'alerte.
                 # --- correlation ---
+                correlation = None
                 try:
                     correlation = correlate(endpoint_id, now)
                     write_correlation(cur, endpoint_id, signal_type, correlation)
                 except Exception as e:
                     log.error(f"Correlation failed for {endpoint_id}/{signal_type}: {e}")
-                # --- explanation (LLM) ---
+                # --- explanation (LLM, avec fallback template interne) ---
+                explanation = None
                 try:
-                    generate_explanation(cur, endpoint_id, signal_type, now)
+                    explanation = generate_explanation(cur, endpoint_id, signal_type, now)
                 except Exception as e:
                     log.error(f"Explanation generation failed for {endpoint_id}/{signal_type}: {e}")
+                # --- notification (en dernier : enrichie de la cause + explication) ---
+                send_slack_alert(endpoint_id, signal_type, severity, score, raw_value,
+                                 correlation=correlation, explanation=explanation)
             else:
                 increment_pending(cur, endpoint_id, signal_type, severity, score, raw_value, layer, now)
                 new_state = "pending"

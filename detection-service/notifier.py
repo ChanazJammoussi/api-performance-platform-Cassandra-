@@ -9,7 +9,20 @@ log = logging.getLogger(__name__)
 
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 
-def send_slack_alert(endpoint_id, signal_type, severity, score, raw_value):
+def send_slack_alert(endpoint_id, signal_type, severity, score, raw_value,
+                     correlation=None, explanation=None):
+    """
+    Envoie l'alerte FIRING sur Slack.
+
+    `correlation` : dict retourne par correlator.correlate() (ou None) -- ajoute
+                    la cause suspectee (scenario/fault + imputation_score).
+    `explanation` : dict retourne par explainer.generate_explanation() (ou None)
+                    -- ajoute summary / cause probable / verifications. Peut etre
+                    un template de fallback (champ `fallback=True`).
+
+    Les deux enrichissements sont optionnels : si l'un manque, l'alerte de base
+    part quand meme (l'alerting ne depend jamais du LLM ni de la correlation).
+    """
     if not SLACK_WEBHOOK_URL:
         log.warning("SLACK_WEBHOOK_URL not set, skipping notification")
         return
@@ -20,13 +33,37 @@ def send_slack_alert(endpoint_id, signal_type, severity, score, raw_value):
         detail = f"error_rate={raw_value:.1f}%"
 
     emoji = "🔴" if severity == "critical" else "🟠"
-    text = (
-        f"{emoji} *FIRING* [{severity.upper()}]\n"
-        f"*Endpoint:* {endpoint_id}\n"
-        f"*Signal:* {signal_type}\n"
-        f"*Detail:* {detail}\n"
-        f"*Score:* {score:.2f}"
-    )
+    lines = [
+        f"{emoji} *FIRING* [{severity.upper()}]",
+        f"*Endpoint:* {endpoint_id}",
+        f"*Signal:* {signal_type}",
+        f"*Detail:* {detail}",
+        f"*Score:* {score:.2f}",
+    ]
+
+    # Cause suspectee issue de la correlation (deploy / injection connue)
+    if correlation:
+        scenario = correlation.get("scenario_id", "?")
+        fault = correlation.get("fault_type", "?")
+        imp = correlation.get("imputation_score")
+        imp_txt = f" (score {imp:.2f})" if isinstance(imp, (int, float)) else ""
+        lines.append(f"*Cause suspectee:* {scenario} / {fault}{imp_txt}")
+
+    # Explication en langage naturel (LLM ou template de fallback)
+    if explanation:
+        src = "template" if explanation.get("fallback") else "LLM"
+        summary = explanation.get("summary")
+        cause = explanation.get("suspected_cause")
+        checks = explanation.get("checks") or []
+        if summary:
+            lines.append(f"\n> {summary}")
+        if cause:
+            lines.append(f"*Cause probable ({src}):* {cause}")
+        if checks:
+            checks_txt = "\n".join(f"  • {c}" for c in checks)
+            lines.append(f"*Verifications:*\n{checks_txt}")
+
+    text = "\n".join(lines)
     try:
         resp = requests.post(
             SLACK_WEBHOOK_URL,
