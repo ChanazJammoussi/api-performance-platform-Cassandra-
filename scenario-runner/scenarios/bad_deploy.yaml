@@ -1,6 +1,16 @@
 id: bad_deploy
 description: "Bad deploy - deploy event suivi d'une regression de latence"
 
+# Deploiement enregistre au debut du scenario (via l'API deploy-api), juste
+# avant l'injection de la regression. Le correlator doit l'attribuer a l'alerte.
+deploy:
+  service: orders
+  version: "v2.3.1-a1b2c3d"
+  metadata:
+    commit: a1b2c3d
+    author: chanaz
+    pr: 128
+
 faults:
   - service: orders
     type: latency_step

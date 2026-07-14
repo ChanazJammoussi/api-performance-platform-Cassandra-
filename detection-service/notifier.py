@@ -10,17 +10,19 @@ log = logging.getLogger(__name__)
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 
 def send_slack_alert(endpoint_id, signal_type, severity, score, raw_value,
-                     correlation=None, explanation=None):
+                     correlation=None, deploy=None, explanation=None):
     """
     Envoie l'alerte FIRING sur Slack.
 
     `correlation` : dict retourne par correlator.correlate() (ou None) -- ajoute
                     la cause suspectee (scenario/fault + imputation_score).
+    `deploy`      : dict retourne par correlator.correlate_deploy() (ou None) --
+                    ajoute le deploiement suspecte (service/version + score).
     `explanation` : dict retourne par explainer.generate_explanation() (ou None)
                     -- ajoute summary / cause probable / verifications. Peut etre
                     un template de fallback (champ `fallback=True`).
 
-    Les deux enrichissements sont optionnels : si l'un manque, l'alerte de base
+    Tous les enrichissements sont optionnels : si l'un manque, l'alerte de base
     part quand meme (l'alerting ne depend jamais du LLM ni de la correlation).
     """
     if not SLACK_WEBHOOK_URL:
@@ -41,7 +43,15 @@ def send_slack_alert(endpoint_id, signal_type, severity, score, raw_value,
         f"*Score:* {score:.2f}",
     ]
 
-    # Cause suspectee issue de la correlation (deploy / injection connue)
+    # Deploiement suspecte issu de la correlation deploy_events
+    if deploy:
+        version = deploy.get("version", "?")
+        service = deploy.get("service", "?")
+        imp = deploy.get("imputation_score")
+        imp_txt = f" (score {imp:.2f})" if isinstance(imp, (int, float)) else ""
+        lines.append(f"*Deploiement suspecte:* {service} {version}{imp_txt}")
+
+    # Cause suspectee issue de la correlation d'injection (scenario ground-truth)
     if correlation:
         scenario = correlation.get("scenario_id", "?")
         fault = correlation.get("fault_type", "?")

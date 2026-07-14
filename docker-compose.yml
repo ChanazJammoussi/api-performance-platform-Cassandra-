@@ -125,6 +125,17 @@ services:
     environment:
       - DATABASE_URL=postgresql://cassandra:cassandra@timescaledb:5432/cassandra
 
+  deploy-api:
+    build: ./detection-service
+    container_name: cassandra-deploy-api
+    command: ["uvicorn", "deploy_api:app", "--host", "0.0.0.0", "--port", "8090"]
+    ports:
+      - "8090:8090"
+    depends_on:
+      - timescaledb
+    environment:
+      - DATABASE_URL=postgresql://cassandra:cassandra@timescaledb:5432/cassandra
+
 volumes:
   timescaledb_data:
   grafana_data:

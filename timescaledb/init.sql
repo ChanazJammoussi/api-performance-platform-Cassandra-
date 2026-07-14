@@ -127,3 +127,22 @@ CREATE TRIGGER trg_alerts_firing
     AFTER UPDATE ON alerts
     FOR EACH ROW
     EXECUTE FUNCTION log_firing_transition();
+
+-- ---------------------------------------------------------------------------
+-- deploy_events : registre des deploiements (control plane).
+-- Alimente par l'API deploy (deploy_api.py) et interroge par le correlator
+-- pour attribuer une regression a un deploiement recent (suspected_deploy_id).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS deploy_events (
+    deploy_id   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    service     TEXT NOT NULL,
+    version     TEXT NOT NULL,
+    deployed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    metadata    JSONB,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_deploy_events_time
+    ON deploy_events (deployed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_deploy_events_service_time
+    ON deploy_events (service, deployed_at DESC);

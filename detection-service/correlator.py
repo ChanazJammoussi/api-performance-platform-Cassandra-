@@ -201,6 +201,106 @@ def correlate(alert_endpoint_id: str, onset: datetime) -> dict | None:
     return best
 
 
+# ---------------------------------------------------------------------------
+# Correlation deploiement (control plane : table deploy_events)
+# ---------------------------------------------------------------------------
+
+# Un deploiement CAUSE une regression : il precede l'onset de l'alerte. On
+# cherche donc les deploys dans [onset - DEPLOY_CAUSAL_WINDOW, onset].
+DEPLOY_CAUSAL_WINDOW_MINUTES = 30
+
+
+def _get_service_for_endpoint(cur, endpoint_id: str) -> str | None:
+    """Deduit le service d'un endpoint_id via la derniere ligne endpoint_features."""
+    cur.execute("""
+        SELECT service FROM endpoint_features
+        WHERE endpoint_id = %s
+        ORDER BY time DESC
+        LIMIT 1
+    """, (endpoint_id,))
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def correlate_deploy(cur, endpoint_id: str, onset: datetime) -> dict | None:
+    """
+    Cherche un deploiement recent susceptible d'avoir cause la regression.
+
+    Retour (ou None) :
+    {
+        "deploy_id":        str,
+        "service":          str,
+        "version":          str,
+        "deployed_at":      datetime,
+        "imputation_score": float,   # [0, 1], decroissance avec la distance temporelle
+        "service_match":    bool,
+    }
+    """
+    if onset.tzinfo is None:
+        onset = onset.replace(tzinfo=timezone.utc)
+
+    window = timedelta(minutes=DEPLOY_CAUSAL_WINDOW_MINUTES)
+    since = onset - window
+    alert_service = _get_service_for_endpoint(cur, endpoint_id)
+
+    # Deploys dans la fenetre causale (deployes AVANT l'onset).
+    cur.execute("""
+        SELECT deploy_id, service, version, deployed_at
+        FROM deploy_events
+        WHERE deployed_at BETWEEN %s AND %s
+        ORDER BY deployed_at DESC
+    """, (since, onset))
+    rows = cur.fetchall()
+    if not rows:
+        return None
+
+    window_seconds = window.total_seconds()
+    candidates = []
+    for deploy_id, service, version, deployed_at in rows:
+        if deployed_at.tzinfo is None:
+            deployed_at = deployed_at.replace(tzinfo=timezone.utc)
+        distance = (onset - deployed_at).total_seconds()
+        if distance < 0:
+            continue  # deploy posterieur a l'onset : pas causal
+        score = max(0.0, 1.0 - distance / window_seconds)
+        service_match = bool(alert_service) and service == alert_service
+        adjusted = min(1.0, score * 1.2) if service_match else score
+        if adjusted > 0.0:
+            candidates.append({
+                "deploy_id":        str(deploy_id),
+                "service":          service,
+                "version":          version,
+                "deployed_at":      deployed_at,
+                "imputation_score": round(adjusted, 4),
+                "service_match":    service_match,
+            })
+
+    if not candidates:
+        return None
+
+    return max(candidates, key=lambda c: (c["imputation_score"], c["service_match"]))
+
+
+def write_deploy_correlation(cur, endpoint_id: str, signal_type: str, result: dict | None):
+    """Ecrit le deploiement suspecte dans alerts.suspected_deploy_id."""
+    if result is None:
+        cur.execute("""
+            UPDATE alerts SET suspected_deploy_id = NULL
+            WHERE endpoint_id = %s AND signal_type = %s
+        """, (endpoint_id, signal_type))
+        log.info(f"Deploy correlation [{endpoint_id}/{signal_type}]: no deploy in causal window")
+    else:
+        cur.execute("""
+            UPDATE alerts SET suspected_deploy_id = %s
+            WHERE endpoint_id = %s AND signal_type = %s
+        """, (result["deploy_id"], endpoint_id, signal_type))
+        log.info(
+            f"Deploy correlation [{endpoint_id}/{signal_type}]: "
+            f"matched {result['service']} {result['version']} "
+            f"score={result['imputation_score']:.3f} service_match={result['service_match']}"
+        )
+
+
 def write_correlation(cur, endpoint_id: str, signal_type: str, result: dict | None):
     """
     Ecrit le resultat de correlation dans la table alerts.

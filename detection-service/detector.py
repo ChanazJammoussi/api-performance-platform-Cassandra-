@@ -5,7 +5,7 @@ import logging
 import psycopg2
 from datetime import datetime, timezone
 from notifier import send_slack_alert
-from correlator import correlate, write_correlation
+from correlator import correlate, write_correlation, correlate_deploy, write_deploy_correlation
 from explainer import generate_explanation
 from baseline_utils import get_baseline, compute_deviation, ENDPOINT_SLOS, DEFAULT_SLOS
 
@@ -178,22 +178,29 @@ def process_signal(cur, endpoint_id, signal_type, anomaly, severity, score, raw_
                 # calculees AVANT la notification pour que le message Slack porte la
                 # cause suspectee et l'explication LLM. Chaque etape est best-effort :
                 # une panne de correlation ou du LLM ne doit jamais bloquer l'alerte.
-                # --- correlation ---
+                # --- correlation injection (ground-truth des scenarios) ---
                 correlation = None
                 try:
                     correlation = correlate(endpoint_id, now)
                     write_correlation(cur, endpoint_id, signal_type, correlation)
                 except Exception as e:
                     log.error(f"Correlation failed for {endpoint_id}/{signal_type}: {e}")
+                # --- correlation deploiement (table deploy_events) ---
+                deploy = None
+                try:
+                    deploy = correlate_deploy(cur, endpoint_id, now)
+                    write_deploy_correlation(cur, endpoint_id, signal_type, deploy)
+                except Exception as e:
+                    log.error(f"Deploy correlation failed for {endpoint_id}/{signal_type}: {e}")
                 # --- explanation (LLM, avec fallback template interne) ---
                 explanation = None
                 try:
                     explanation = generate_explanation(cur, endpoint_id, signal_type, now)
                 except Exception as e:
                     log.error(f"Explanation generation failed for {endpoint_id}/{signal_type}: {e}")
-                # --- notification (en dernier : enrichie de la cause + explication) ---
+                # --- notification (en dernier : enrichie cause + deploy + explication) ---
                 send_slack_alert(endpoint_id, signal_type, severity, score, raw_value,
-                                 correlation=correlation, explanation=explanation)
+                                 correlation=correlation, deploy=deploy, explanation=explanation)
             else:
                 increment_pending(cur, endpoint_id, signal_type, severity, score, raw_value, layer, now)
                 new_state = "pending"

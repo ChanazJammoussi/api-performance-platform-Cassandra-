@@ -164,6 +164,26 @@ faults:
 
 ---
 
+## Deploy Events API (`detection-service/deploy_api.py`)
+
+Registre de déploiements (control plane) exposé sur le port **8090**. Une CI/CD —
+ou le scenario runner pour les démos — enregistre un déploiement, que le
+correlator attribue ensuite à une régression.
+
+| Endpoint | Description |
+|---|---|
+| `POST /deploys` | `{service, version, deployed_at?, metadata?}` → crée un deploy, retourne `deploy_id` |
+| `GET /deploys` | liste les déploiements récents (`?service=`, `?since_minutes=`) |
+| `GET /health` | liveness |
+
+Stockés dans la table `deploy_events`. Le `correlator.correlate_deploy()` cherche
+un déploiement dans la fenêtre causale `[onset - 30min, onset]` (un deploy précède
+la régression), privilégie le même service, et écrit `alerts.suspected_deploy_id`.
+L'alerte Slack est enrichie de la ligne *Déploiement suspecté: service version*.
+
+Un scénario YAML peut déclarer un bloc `deploy:` (voir `bad_deploy.yaml`) : le
+runner l'enregistre via l'API juste avant d'injecter la faute.
+
 ## Load Testing (`k6/load.js`)
 
 Simule une **journée compressée en 2 heures** avec courbe sinusoïdale (5 à 50 VUs).
