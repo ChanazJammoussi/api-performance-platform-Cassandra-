@@ -1,0 +1,1549 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      },
+      {
+        "datasource": {
+          "type": "postgres",
+          "uid": "DS_TIMESCALEDB"
+        },
+        "enable": true,
+        "hide": false,
+        "iconColor": "#F2495C",
+        "name": "FIRING alerts",
+        "rawQuery": true,
+        "rawSql": "SELECT opened_at AS time, endpoint_id || ' [' || signal_type || '] ' || severity AS text, 'FIRING' AS tags FROM alerts WHERE state IN ('firing','resolving') AND opened_at BETWEEN $__timeFrom() AND $__timeTo() AND endpoint_id = '$endpoint' ORDER BY opened_at",
+        "showIn": 0,
+        "type": "tags"
+      },
+      {
+        "datasource": {
+          "type": "postgres",
+          "uid": "DS_TIMESCALEDB"
+        },
+        "enable": true,
+        "hide": false,
+        "iconColor": "#73BF69",
+        "name": "RESOLVED alerts",
+        "rawQuery": true,
+        "rawSql": "SELECT resolved_at AS time, endpoint_id || ' RESOLVED' AS text, 'RESOLVED' AS tags FROM alerts WHERE resolved_at IS NOT NULL AND resolved_at BETWEEN $__timeFrom() AND $__timeTo() AND endpoint_id = '$endpoint' ORDER BY resolved_at",
+        "showIn": 0,
+        "type": "tags"
+      }
+    ]
+  },
+  "description": "Cassandra - Observabilite API : latence, erreurs, baseline saisonniere, alertes",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 100,
+      "title": "Vue d'ensemble",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "DS_TIMESCALEDB"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "id": 1,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "auto"
+      },
+      "title": "Alertes FIRING (count)",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "DS_TIMESCALEDB"
+          },
+          "rawQuery": true,
+          "rawSql": "SELECT NOW() AS time, COUNT(*) AS value FROM alerts WHERE state = 'firing'",
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "DS_TIMESCALEDB"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "auto"
+      },
+      "title": "Alertes PENDING",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "DS_TIMESCALEDB"
+          },
+          "rawQuery": true,
+          "rawSql": "SELECT NOW() AS time, COUNT(*) AS value FROM alerts WHERE state = 'pending'",
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "DS_TIMESCALEDB"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.1
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "auto"
+      },
+      "title": "Error rate 5xx (endpoint selectionne)",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "DS_TIMESCALEDB"
+          },
+          "rawQuery": true,
+          "rawSql": "SELECT time, error_rate_5xx AS value FROM endpoint_features WHERE endpoint_id = '$endpoint' AND time >= $__timeFrom() ORDER BY time DESC LIMIT 1",
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "DS_TIMESCALEDB"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 200
+              },
+              {
+                "color": "red",
+                "value": 500
+              }
+            ]
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 12,
+        "y": 1
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "auto"
+      },
+      "title": "p99 actuel (endpoint selectionne)",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "DS_TIMESCALEDB"
+          },
+          "rawQuery": true,
+          "rawSql": "SELECT time, p99_ms AS value FROM endpoint_features WHERE endpoint_id = '$endpoint' AND time >= $__timeFrom() ORDER BY time DESC LIMIT 1",
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "DS_TIMESCALEDB"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.5
+              }
+            ]
+          },
+          "unit": "short",
+          "decimals": 3
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 16,
+        "y": 1
+      },
+      "id": 5,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "auto"
+      },
+      "title": "Score anomalie (endpoint selectionne)",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "DS_TIMESCALEDB"
+          },
+          "rawQuery": true,
+          "rawSql": "SELECT updated_at AS time, score AS value FROM alerts WHERE endpoint_id = '$endpoint' ORDER BY updated_at DESC LIMIT 1",
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "id": 101,
+      "title": "Latence avec baseline saisonniere",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "DS_TIMESCALEDB"
+      },
+      "description": "p99/p50 observes + bande baseline saisonniere (p10..p90 conditionne sur dow+hour). Les annotations rouges indiquent les transitions FIRING.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "ms",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "unit": "ms"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "baseline_p10"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#73BF69",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    4,
+                    4
+                  ],
+                  "fill": "dash"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 5
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "baseline_p50"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#73BF69",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    4,
+                    4
+                  ],
+                  "fill": "dash"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "baseline_p90"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#73BF69",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    4,
+                    4
+                  ],
+                  "fill": "dash"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 5
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p99_ms"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#F2495C",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p50_ms"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#5794F2",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "id": 10,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "title": "Latence p99 / p50 + baseline saisonniere -- $endpoint",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "DS_TIMESCALEDB"
+          },
+          "rawQuery": true,
+          "rawSql": "SELECT time, p99_ms, p50_ms FROM endpoint_features WHERE endpoint_id = '$endpoint' AND $__timeFilter(time) ORDER BY time",
+          "format": "time_series",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "DS_TIMESCALEDB"
+          },
+          "rawQuery": true,
+          "rawSql": "SELECT f.time, b.p10 AS baseline_p10, b.p50 AS baseline_p50, b.p90 AS baseline_p90 FROM endpoint_features f JOIN endpoint_baseline b ON b.endpoint_id = f.endpoint_id AND b.metric = 'p99_ms' AND b.dow = EXTRACT(DOW FROM f.time)::smallint AND b.hour_bucket = EXTRACT(HOUR FROM f.time)::smallint WHERE f.endpoint_id = '$endpoint' AND $__timeFilter(f.time) ORDER BY f.time",
+          "format": "time_series",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "id": 102,
+      "title": "Taux d'erreurs",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "DS_TIMESCALEDB"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "unit": "percentunit",
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "error_rate_5xx"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#F2495C",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "error_rate_4xx"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FF9830",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "baseline_p90_5xx"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#73BF69",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    4,
+                    4
+                  ],
+                  "fill": "dash"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 15
+      },
+      "id": 20,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "title": "Error rate 5xx / 4xx -- $endpoint",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "DS_TIMESCALEDB"
+          },
+          "rawQuery": true,
+          "rawSql": "SELECT time, error_rate_5xx, error_rate_4xx FROM endpoint_features WHERE endpoint_id = '$endpoint' AND $__timeFilter(time) ORDER BY time",
+          "format": "time_series",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "DS_TIMESCALEDB"
+          },
+          "rawQuery": true,
+          "rawSql": "SELECT f.time, b.p90 AS baseline_p90_5xx FROM endpoint_features f JOIN endpoint_baseline b ON b.endpoint_id = f.endpoint_id AND b.metric = 'error_rate_5xx' AND b.dow = EXTRACT(DOW FROM f.time)::smallint AND b.hour_bucket = EXTRACT(HOUR FROM f.time)::smallint WHERE f.endpoint_id = '$endpoint' AND $__timeFilter(f.time) ORDER BY f.time",
+          "format": "time_series",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "DS_TIMESCALEDB"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "reqps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 15
+      },
+      "id": 21,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "title": "Throughput RPS -- $endpoint",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "DS_TIMESCALEDB"
+          },
+          "rawQuery": true,
+          "rawSql": "SELECT time, rps FROM endpoint_features WHERE endpoint_id = '$endpoint' AND $__timeFilter(time) ORDER BY time",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 23
+      },
+      "id": 103,
+      "title": "Alertes actives et historique",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "DS_TIMESCALEDB"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "state"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background",
+                  "mode": "basic"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "ok": {
+                        "color": "green",
+                        "index": 0
+                      }
+                    },
+                    "type": "value"
+                  },
+                  {
+                    "options": {
+                      "pending": {
+                        "color": "yellow",
+                        "index": 1
+                      }
+                    },
+                    "type": "value"
+                  },
+                  {
+                    "options": {
+                      "firing": {
+                        "color": "red",
+                        "index": 2
+                      }
+                    },
+                    "type": "value"
+                  },
+                  {
+                    "options": {
+                      "resolving": {
+                        "color": "orange",
+                        "index": 3
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "severity"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "warning": {
+                        "color": "orange",
+                        "index": 0
+                      }
+                    },
+                    "type": "value"
+                  },
+                  {
+                    "options": {
+                      "critical": {
+                        "color": "red",
+                        "index": 1
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "score"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "imputation_score"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      },
+      "id": 30,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "updated_at"
+          }
+        ]
+      },
+      "title": "Alertes -- tous endpoints",
+      "type": "table",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "DS_TIMESCALEDB"
+          },
+          "rawQuery": true,
+          "rawSql": "SELECT endpoint_id, signal_type, state, severity, ROUND(score::numeric, 3) AS score, ROUND(imputation_score::numeric, 3) AS imputation_score, suspected_fault, opened_at, resolved_at, updated_at FROM alerts WHERE $__timeFilter(updated_at) ORDER BY updated_at DESC LIMIT 100",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      },
+      "id": 104,
+      "title": "Score anomalie dans le temps",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "DS_TIMESCALEDB"
+      },
+      "description": "Evolution du score d'anomalie et du pending_count. Score > 0.5 = PENDING, > seuil configurable = FIRING.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "min": 0,
+          "max": 1,
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "score"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FF9830",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 0.5
+                    },
+                    {
+                      "color": "red",
+                      "value": 0.75
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 35
+      },
+      "id": 40,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "title": "Score anomalie -- $endpoint / $signal",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "DS_TIMESCALEDB"
+          },
+          "rawQuery": true,
+          "rawSql": "SELECT updated_at AS time, score FROM alerts WHERE endpoint_id = '$endpoint' AND signal_type = '$signal' AND $__timeFilter(updated_at) ORDER BY updated_at",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 43
+      },
+      "id": 105,
+      "title": "Evaluation -- Metriques de detection",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "DS_TIMESCALEDB"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.5
+              },
+              {
+                "color": "green",
+                "value": 0.8
+              }
+            ]
+          },
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 44
+      },
+      "id": 50,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "auto"
+      },
+      "title": "Precision globale",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "DS_TIMESCALEDB"
+          },
+          "rawQuery": true,
+          "rawSql": "SELECT NOW() AS time, CASE WHEN (COUNT(*) FILTER (WHERE opened_at IS NOT NULL AND suspected_fault IS NOT NULL) + COUNT(*) FILTER (WHERE opened_at IS NOT NULL AND suspected_fault IS NULL)) = 0 THEN NULL ELSE COUNT(*) FILTER (WHERE opened_at IS NOT NULL AND suspected_fault IS NOT NULL)::float / NULLIF(COUNT(*) FILTER (WHERE opened_at IS NOT NULL), 0) END AS value FROM alerts WHERE opened_at >= NOW() - INTERVAL '24 hours'",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "DS_TIMESCALEDB"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 60
+              },
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 44
+      },
+      "id": 51,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "auto"
+      },
+      "title": "Delai median detection (s)",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "DS_TIMESCALEDB"
+          },
+          "rawQuery": true,
+          "rawSql": "SELECT NOW() AS time, PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (opened_at - pending_since))) AS value FROM alerts WHERE opened_at IS NOT NULL AND pending_since IS NOT NULL AND opened_at > pending_since AND opened_at >= NOW() - INTERVAL '24 hours'",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "DS_TIMESCALEDB"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 2
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 44
+      },
+      "id": 52,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "auto"
+      },
+      "title": "FP derni\u00e8res 24h",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "DS_TIMESCALEDB"
+          },
+          "rawQuery": true,
+          "rawSql": "SELECT NOW() AS time, COUNT(*) AS value FROM alerts WHERE state IN ('firing','resolving') AND suspected_fault IS NULL AND opened_at >= NOW() - INTERVAL '24 hours'",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "DS_TIMESCALEDB"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "state"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "ok": {
+                        "color": "green",
+                        "index": 0
+                      }
+                    },
+                    "type": "value"
+                  },
+                  {
+                    "options": {
+                      "pending": {
+                        "color": "yellow",
+                        "index": 1
+                      }
+                    },
+                    "type": "value"
+                  },
+                  {
+                    "options": {
+                      "firing": {
+                        "color": "red",
+                        "index": 2
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "score"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "imputation_score"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 48
+      },
+      "id": 60,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "opened_at"
+          }
+        ]
+      },
+      "title": "Historique alertes FIRING avec explication LLM",
+      "type": "table",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "DS_TIMESCALEDB"
+          },
+          "rawQuery": true,
+          "rawSql": "SELECT endpoint_id, signal_type, state, severity, ROUND(score::numeric, 3) AS score, suspected_fault, ROUND(imputation_score::numeric, 2) AS imputation_score, explanation->>'summary' AS explication_llm, opened_at, resolved_at FROM alerts WHERE state IN ('firing','resolving','ok') AND opened_at IS NOT NULL AND $__timeFilter(opened_at) ORDER BY opened_at DESC LIMIT 50",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "tags": [
+    "cassandra",
+    "observability",
+    "sre"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": false,
+          "text": "GET /orders",
+          "value": "GET /orders"
+        },
+        "datasource": {
+          "type": "postgres",
+          "uid": "DS_TIMESCALEDB"
+        },
+        "definition": "SELECT DISTINCT endpoint_id FROM endpoint_features ORDER BY endpoint_id",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Endpoint",
+        "multi": false,
+        "name": "endpoint",
+        "options": [],
+        "query": "SELECT DISTINCT endpoint_id FROM endpoint_features ORDER BY endpoint_id",
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "p99_ms",
+          "value": "p99_ms"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Signal",
+        "multi": false,
+        "name": "signal",
+        "options": [
+          {
+            "selected": true,
+            "text": "p99_ms",
+            "value": "p99_ms"
+          },
+          {
+            "selected": false,
+            "text": "p50_ms",
+            "value": "p50_ms"
+          },
+          {
+            "selected": false,
+            "text": "error_rate_5xx",
+            "value": "error_rate_5xx"
+          },
+          {
+            "selected": false,
+            "text": "error_rate_4xx",
+            "value": "error_rate_4xx"
+          },
+          {
+            "selected": false,
+            "text": "rps",
+            "value": "rps"
+          }
+        ],
+        "query": "p99_ms,p50_ms,error_rate_5xx,error_rate_4xx,rps",
+        "type": "custom"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-3h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Cassandra - API Performance & Alerting",
+  "uid": "cassandra-main-v1",
+  "version": 1
+}

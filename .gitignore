@@ -8,6 +8,7 @@ venv/
 # Données locales
 *.json
 !scenario-runner/ground_truth_test.json
+!grafana/provisioning/dashboards/cassandra_dashboard.json
 
 # OS
 .DS_Store
