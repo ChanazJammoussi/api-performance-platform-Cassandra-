@@ -146,3 +146,27 @@ CREATE INDEX IF NOT EXISTS idx_deploy_events_time
     ON deploy_events (deployed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_deploy_events_service_time
     ON deploy_events (service, deployed_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- anomalies : anomaly store (spec 6.3). Un enregistrement par fenetre scoree
+-- (endpoint x cycle), ecrit par detector.py. Alimente la timeline de score
+-- anomalie du dashboard Grafana (spec 5.9) et trace la provenance des couches.
+--   layer     : static | baseline | iforest | combined
+--   direction : degradation | improvement | normal
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS anomalies (
+    anomaly_id            UUID NOT NULL DEFAULT gen_random_uuid(),
+    endpoint_id           TEXT NOT NULL,
+    signal_type           TEXT NOT NULL DEFAULT 'p99_ms',
+    detected_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    window_start          TIMESTAMPTZ,
+    score                 DOUBLE PRECISION,   -- score combine calibre [0,1]
+    layer                 TEXT,
+    direction             TEXT,
+    contributing_features JSONB
+);
+
+SELECT create_hypertable('anomalies', 'detected_at', if_not_exists => TRUE);
+
+CREATE INDEX IF NOT EXISTS idx_anomalies_endpoint_time
+    ON anomalies (endpoint_id, detected_at DESC);

@@ -21,6 +21,9 @@ Thumbs.db
 *.log
 *.pid
 
+# Artefacts de modele ML (binaires, regeneres par train_model.py)
+detection-service/models/
+
 # Résultats de campagne
 scenario-runner/results/
 

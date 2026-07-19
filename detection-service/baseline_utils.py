@@ -12,6 +12,21 @@ ENDPOINT_SLOS = {
 DEFAULT_SLOS = {"p99_ms": 500, "error_rate_5xx": 10}
 
 
+def pg_dow(dt):
+    """
+    Jour de la semaine dans la convention PostgreSQL EXTRACT(DOW) : 0=dimanche..6=samedi.
+    baseline_job.py stocke endpoint_baseline.dow avec cette convention ; il faut donc
+    la reutiliser cote lecture. datetime.weekday() est 0=lundi..6=dimanche, d'ou la
+    conversion (evite de rater le bucket saisonnier exact et de tomber sur le fallback).
+    """
+    return (dt.weekday() + 1) % 7
+
+
+def get_baselines(cur, endpoint_id, metrics, dow, hour_bucket):
+    """Baseline (p10, p50, p90) pour plusieurs metriques d'un coup -> dict {metric: tuple|None}."""
+    return {m: get_baseline(cur, endpoint_id, m, dow, hour_bucket) for m in metrics}
+
+
 def get_baseline(cur, endpoint_id, metric, dow, hour_bucket):
     cur.execute("""
         SELECT p10, p50, p90

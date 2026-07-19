@@ -184,6 +184,42 @@ L'alerte Slack est enrichie de la ligne *Déploiement suspecté: service version
 Un scénario YAML peut déclarer un bloc `deploy:` (voir `bad_deploy.yaml`) : le
 runner l'enregistre via l'API juste avant d'injecter la faute.
 
+## Détection en couches (spec 5.4 / 8.3)
+
+Le détecteur (`detector.py`) combine trois couches par signal `p99_ms` :
+
+| Couche | Fichier | Rôle |
+|---|---|---|
+| Layer 0 — static | `baseline_utils.ENDPOINT_SLOS` | seuils SLO fixes (baseline de comparaison) |
+| Layer 1 — baseline | `baseline_utils` + `endpoint_baseline` | déviation vs bande saisonnière (dow×heure), donne la **direction** |
+| Layer 2 — Isolation Forest | `ml_model.py` | anomalie multivariée non supervisée, **gatée par la direction** |
+
+**Features dérivées** (`features.py`, math pure) — toutes **endpoint-relatives** (c'est ce qui
+rend viable un seul modèle global) : déviations baseline signées p50/p95/p99, `error_rate_5xx`,
+pente Theil-Sen de p99 normalisée, ratio p99/p50, `rps_delta` relatif. Fenêtre glissante de 10
+cycles ; la fenêtre la plus récente incomplète est exclue (watermark).
+
+**Direction gating** : la couche ML ne contribue qu'en cas de `degradation` (p99 > p90), jamais
+sur une performance anormalement bonne (`improvement`).
+
+**Combinaison** : `combined = baseline_norm + (1 - baseline_norm) * ml_gated`, plancher par le
+dépassement SLO dur ; calibrée [0,1] contre la distribution trailing des scores. Déclenche si
+dépassement SLO **ou** `combined ≥ 0.5`.
+
+**Modèle** (`train_model.py`) : `IsolationForest` global entraîné sur l'historique
+`endpoint_features` en **excluant les fenêtres d'injection** (test set, jamais en entraînement).
+Artefact versionné par timestamp + pointeur `latest` (volume `models_data`), promotion soumise à
+un **sanity-gate** (shift de distribution KS sur une fenêtre de référence fixe). Refit *nightly*
+via le service `trainer`. Le `detector` recharge l'artefact quand `latest` change.
+
+**Anomaly store** : la table `anomalies` reçoit un enregistrement par cycle scoré
+(`score`, `layer`, `direction`, `contributing_features` top-3) — alimente la timeline Grafana.
+
+```bash
+# Entraîner un modèle manuellement (run-once)
+docker compose run --rm trainer python train_model.py
+```
+
 ## Load Testing (`k6/load.js`)
 
 Simule une **journée compressée en 2 heures** avec courbe sinusoïdale (5 à 50 VUs).

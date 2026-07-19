@@ -1,4 +1,5 @@
 import os
+import json
 import time
 import math
 import logging
@@ -7,7 +8,12 @@ from datetime import datetime, timezone
 from notifier import send_slack_alert
 from correlator import correlate, write_correlation, correlate_deploy, write_deploy_correlation
 from explainer import generate_explanation
-from baseline_utils import get_baseline, compute_deviation, ENDPOINT_SLOS, DEFAULT_SLOS
+from baseline_utils import (
+    get_baseline, get_baselines, compute_deviation, pg_dow,
+    ENDPOINT_SLOS, DEFAULT_SLOS,
+)
+from features import compute_features, vectorize, direction_of, WINDOW_SIZE, MIN_WINDOW
+import ml_model
 
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -54,6 +60,73 @@ DB_URL = os.environ.get("DATABASE_URL", "postgresql://cassandra:cassandra@localh
 
 PENDING_WINDOWS = 2    # cycles avant FIRING
 RESOLVING_WINDOWS = 2  # cycles avant OK
+
+# Seuil de score combine pour declencher (le layer 1 a deviation>1.0 donne
+# baseline_norm=0.5, donc ce seuil preserve le declenchement baseline existant).
+FIRE_THRESHOLD = 0.5
+# Metriques dont la couche ML a besoin de la baseline saisonniere.
+ML_METRICS = ["p50_ms", "p95_ms", "p99_ms", "rps"]
+
+# Cache du modele ML promu, recharge quand l'artefact latest change (retrain nightly).
+_ML = {"bundle": None, "mtime": 0.0}
+
+
+def maybe_load_model():
+    """Charge/recharge l'artefact ML promu si son mtime a change. Best-effort."""
+    path = ml_model.latest_path()
+    try:
+        mt = os.path.getmtime(path)
+    except OSError:
+        return  # pas d'artefact : la couche ML reste inactive
+    if _ML["bundle"] is None or mt > _ML["mtime"]:
+        bundle = ml_model.load_latest()
+        if bundle:
+            _ML["bundle"] = bundle
+            _ML["mtime"] = mt
+            log.info(f"Modele ML charge (trained_at={bundle['meta'].get('trained_at')}, "
+                     f"n={bundle['meta'].get('n_samples')})")
+
+
+def get_window(cur, endpoint_id, n):
+    """Derniere fenetre de n cycles pour un endpoint (time croissant, dicts)."""
+    cur.execute("""
+        SELECT time, rps, p50_ms, p95_ms, p99_ms, error_rate_5xx
+        FROM endpoint_features
+        WHERE endpoint_id = %s AND p99_ms IS NOT NULL AND p99_ms < 'NaN'::float8
+        ORDER BY time DESC
+        LIMIT %s
+    """, (endpoint_id, n))
+    rows = list(reversed(cur.fetchall()))
+    return [
+        {"time": t, "rps": rps, "p50_ms": p50, "p95_ms": p95, "p99_ms": p99, "error_rate_5xx": err}
+        for (t, rps, p50, p95, p99, err) in rows
+    ]
+
+
+def _finite(v):
+    """Renvoie v si c'est un nombre fini, sinon None (baselines NaN cote DB)."""
+    return v if (isinstance(v, (int, float)) and math.isfinite(v)) else None
+
+
+def _json_safe(obj):
+    """Remplace recursivement les floats non finis par None : JSONB refuse NaN/Inf."""
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    return obj
+
+
+def write_anomaly(cur, endpoint_id, signal_type, window_start, score, layer, direction, contributing):
+    """Ecrit un enregistrement dans l'anomaly store (spec 6.3). Best-effort cote appelant."""
+    cur.execute("""
+        INSERT INTO anomalies
+            (endpoint_id, signal_type, window_start, score, layer, direction, contributing_features)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+    """, (endpoint_id, signal_type, window_start, score, layer, direction,
+          json.dumps(_json_safe(contributing))))
 
 def get_latest_features(cur):
     cur.execute("""
@@ -291,9 +364,10 @@ def ensure_schema(cur):
 def run_detection(conn):
     cur = conn.cursor()
     now = datetime.now(timezone.utc)
-    dow = now.weekday()
+    dow = pg_dow(now)
     hour = now.hour
     _expected_states = {}
+    maybe_load_model()
     rows = get_latest_features(cur)
     for row in rows:
         endpoint_id, p99, err5xx, ts = row
@@ -301,25 +375,105 @@ def run_detection(conn):
         if p99 is None or (isinstance(p99, float) and math.isnan(p99)):
             continue
 
-        baseline = get_baseline(cur, endpoint_id, "p99_ms", dow, hour)
-        if baseline:
-            p10, p50, p90 = baseline
+        # --- Signal p99 : layer 0 (static) + layer 1 (baseline) + layer 2 (ML) ---
+        baselines = get_baselines(cur, endpoint_id, ML_METRICS, dow, hour)
+        b99 = baselines.get("p99_ms")
+        if b99:
+            p10, p50b, p90 = _finite(b99[0]), _finite(b99[1]), _finite(b99[2])
             deviation = compute_deviation(p99, p10, p90)
         else:
+            p10 = p50b = p90 = None
             deviation = 0.0
-            p90 = None
 
+        direction = direction_of(p99, p10, p90)
         slos = ENDPOINT_SLOS.get(endpoint_id, DEFAULT_SLOS)
 
-        if p99 > slos["p99_ms"]:
-            severity = "critical" if p99 > slos["p99_ms"] * 2 else "warning"
-            static_score = (p99 - slos["p99_ms"]) / (slos["p99_ms"] + 1e-6)
-            process_signal(cur, endpoint_id, "p99_ms", True, severity, static_score, p99, "static", now, _expected_states, p99=p99, err5xx=err5xx)
-        elif deviation > 1.0:
-            severity = "critical" if deviation > 2.0 else "warning"
-            process_signal(cur, endpoint_id, "p99_ms", True, severity, deviation, p99, "baseline", now, _expected_states, p99=p99, err5xx=err5xx)
+        static_breach = p99 > slos["p99_ms"]
+        static_norm = min(1.0, (p99 - slos["p99_ms"]) / (slos["p99_ms"] + 1e-6)) if static_breach else 0.0
+        baseline_norm = min(1.0, deviation / 2.0)  # deviation>2 -> 1.0 (critique)
+
+        # Fenetre + features derivees endpoint-relatives (aussi pour l'anomaly store).
+        window = get_window(cur, endpoint_id, WINDOW_SIZE)
+        feat = compute_features(window, baselines) if len(window) >= MIN_WINDOW else None
+
+        # Layer 2 : Isolation Forest, calibre puis GATE par la direction (spec 5.4) :
+        # ne contribue qu'en cas de degradation, jamais sur une perf anormalement bonne.
+        ml_norm = 0.0
+        ml_top = None
+        bundle = _ML["bundle"]
+        if feat is not None and bundle is not None:
+            try:
+                x = vectorize(feat)
+                meta = bundle["meta"]
+                raw = ml_model.raw_anomaly(bundle["model"], x)[0]
+                ml_norm = float(ml_model.calibrate(raw, meta["calibration"]))
+                ml_top = ml_model.attribute(bundle["model"], x, meta["feature_medians"], meta.get("calibration"))
+            except Exception as e:
+                log.error(f"ML scoring failed for {endpoint_id}: {e}")
+        ml_gated = ml_norm if direction == "degradation" else 0.0
+
+        # Combinaison calibree (spec 8.3) : layer 1 = plancher + direction, layer 2 additif.
+        combined = baseline_norm + (1.0 - baseline_norm) * ml_gated
+        if static_breach:
+            combined = max(combined, static_norm)  # un depassement SLO dur est un plancher
+        if not math.isfinite(combined):
+            combined = 0.0
+
+        anomaly = static_breach or combined >= FIRE_THRESHOLD
+
+        layer_scores = {"static": static_norm, "baseline": baseline_norm, "iforest": ml_gated}
+        strong = [k for k, v in layer_scores.items() if v >= 0.3]
+        if len(strong) >= 2:
+            layer = "combined"
+        elif anomaly:
+            layer = max(layer_scores, key=layer_scores.get)
         else:
-            process_signal(cur, endpoint_id, "p99_ms", False, None, 0.0, p99, None, now, _expected_states, p99=p99, err5xx=err5xx)
+            layer = None
+
+        severity = "critical" if (p99 > slos["p99_ms"] * 2 or combined >= 0.8) else "warning"
+
+        # Attribution top-3 : ML si dispo, sinon deviations baseline les plus fortes.
+        if ml_top:
+            top_features = [[n, s] for n, s in ml_top]
+        elif feat:
+            top_features = [[k, round(v, 4)]
+                            for k, v in sorted(feat.items(), key=lambda kv: abs(kv[1]), reverse=True)[:3]]
+        else:
+            top_features = []
+
+        contributing = {
+            "combined": round(combined, 4),
+            "layers": {k: round(v, 4) for k, v in layer_scores.items()},
+            "direction": direction,
+            "ml_norm": round(ml_norm, 4),
+            "top_features": top_features,
+            "baseline": {
+                "metric": "p99_ms",
+                "observed": round(p99, 2),
+                "expected": round(p50b, 2) if p50b is not None else None,
+                "band": [round(p10, 2), round(p90, 2)] if (p10 is not None and p90 is not None) else None,
+            },
+        }
+
+        # Anomaly store : un enregistrement par cycle scoree (spec 6.3), best-effort.
+        try:
+            write_anomaly(cur, endpoint_id, "p99_ms", ts, round(combined, 4),
+                          layer or "combined", direction, contributing)
+        except Exception as e:
+            log.error(f"Anomaly write failed for {endpoint_id}: {e}")
+
+        process_signal(cur, endpoint_id, "p99_ms", anomaly, severity if anomaly else None,
+                       combined if anomaly else 0.0, p99, layer, now, _expected_states,
+                       p99=p99, err5xx=err5xx)
+
+        # Persiste les features contributives sur l'alerte (best-effort).
+        if anomaly:
+            try:
+                cur.execute(
+                    "UPDATE alerts SET contributing_features = %s WHERE endpoint_id = %s AND signal_type = %s",
+                    (json.dumps(_json_safe(contributing)), endpoint_id, "p99_ms"))
+            except Exception as e:
+                log.error(f"contributing_features write failed for {endpoint_id}: {e}")
 
         if err5xx is not None and err5xx > slos["error_rate_5xx"]:
             err_score = (err5xx - slos["error_rate_5xx"]) / (slos["error_rate_5xx"] + 1e-6)

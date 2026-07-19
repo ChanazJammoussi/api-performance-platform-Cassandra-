@@ -111,10 +111,12 @@ services:
     environment:
       - DATABASE_URL=postgresql://cassandra:cassandra@timescaledb:5432/cassandra
       - GROUND_TRUTH_DIR=/data/results
+      - MODEL_DIR=/app/models
       - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
     volumes:
       - ./scenario-runner/results:/data/results:ro
+      - models_data:/app/models
 
   baseline:
     build: ./detection-service
@@ -136,7 +138,26 @@ services:
     environment:
       - DATABASE_URL=postgresql://cassandra:cassandra@timescaledb:5432/cassandra
 
+  # --- Trainer ML : refit nightly de l'Isolation Forest (spec 8.3) -----------
+  # Ecrit l'artefact dans le volume partage models_data ; le detector recharge
+  # automatiquement le pointeur latest quand il change. Exclut les fenetres
+  # d'injection (test set) via GROUND_TRUTH_DIR.
+  trainer:
+    build: ./detection-service
+    container_name: cassandra-trainer
+    command: ["python", "-u", "train_model.py", "--loop", "--interval", "86400"]
+    depends_on:
+      - timescaledb
+    environment:
+      - DATABASE_URL=postgresql://cassandra:cassandra@timescaledb:5432/cassandra
+      - GROUND_TRUTH_DIR=/data/results
+      - MODEL_DIR=/app/models
+    volumes:
+      - ./scenario-runner/results:/data/results:ro
+      - models_data:/app/models
+
 volumes:
   timescaledb_data:
   grafana_data:
   prometheus_data:
+  models_data:
