@@ -388,6 +388,49 @@
           "rawSql": "SELECT fault_type, n, round((dr_static*100)::numeric,0) AS \"DR static %\", round((dr_layered*100)::numeric,0) AS \"DR layered %\", round(delay_static_s::numeric,0) AS \"delai static (s)\", round(delay_layered_s::numeric,0) AS \"delai layered (s)\" FROM eval_runs WHERE run_id=(SELECT run_id FROM eval_runs ORDER BY run_at DESC LIMIT 1) ORDER BY (fault_type='OVERALL'), fault_type"
         }
       ]
+    },
+    {
+      "type": "table",
+      "title": "Sensibilite -- detection rate par magnitude (core vs stress)",
+      "datasource": {
+        "type": "postgres",
+        "uid": "DS_TIMESCALEDB"
+      },
+      "description": "Taux de detection en fonction de la magnitude de la faute. Le taux doit croitre avec la magnitude.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": false
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 25
+      },
+      "id": 8,
+      "options": {
+        "showHeader": true,
+        "footer": {
+          "show": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "DS_TIMESCALEDB"
+          },
+          "rawQuery": true,
+          "format": "table",
+          "refId": "A",
+          "rawSql": "SELECT fault_type, magnitude, n, round((dr_static*100)::numeric,0) AS \"DR static %\", round((dr_layered*100)::numeric,0) AS \"DR layered %\" FROM eval_runs WHERE magnitude<>'all' AND run_id=(SELECT run_id FROM eval_runs ORDER BY run_at DESC LIMIT 1) ORDER BY fault_type, magnitude"
+        }
+      ]
     }
   ]
 }

@@ -181,6 +181,7 @@ CREATE TABLE IF NOT EXISTS eval_runs (
     run_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
     input_set           TEXT,
     fault_type          TEXT NOT NULL,
+    magnitude           TEXT NOT NULL DEFAULT 'all',  -- 'all' | 'core' | 'stress' (sensibilite)
     n                   INTEGER,
     dr_static           DOUBLE PRECISION,   -- detection rate static (layer 0)
     dr_layered          DOUBLE PRECISION,   -- detection rate layered (baseline+ML)
@@ -191,7 +192,7 @@ CREATE TABLE IF NOT EXISTS eval_runs (
     fp_per_hour_static  DOUBLE PRECISION,
     fp_per_hour_layered DOUBLE PRECISION,
     span_hours          DOUBLE PRECISION,
-    PRIMARY KEY (run_id, fault_type)
+    PRIMARY KEY (run_id, fault_type, magnitude)
 );
 
 CREATE INDEX IF NOT EXISTS idx_eval_runs_time ON eval_runs (run_at DESC);

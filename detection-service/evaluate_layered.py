@@ -203,6 +203,33 @@ class Stat:
     delays: list = field(default_factory=list)
 
 
+def magnitude_of(window):
+    """Magnitude derivee du nom de fichier de campagne : 'core' | 'stress' | 'all'."""
+    src = (window.source_file or "").lower()
+    if "stress" in src:
+        return "stress"
+    if "core" in src:
+        return "core"
+    return "all"
+
+
+def group_stats(windows, onsets, keyfn):
+    """Stats {cle: {'static':Stat,'layered':Stat}} pour une fonction de cle arbitraire."""
+    groups = {}
+    for w in windows:
+        eps = onsets.get(w.target_endpoint, {"static": [], "layered": []})
+        ds = match_window(eps["static"], w)
+        dl = match_window(eps["layered"], w)
+        g = groups.setdefault(keyfn(w), {"static": Stat(), "layered": Stat()})
+        for name, d in (("static", ds), ("layered", dl)):
+            if d is not None:
+                g[name].tp += 1
+                g[name].delays.append(d)
+            else:
+                g[name].fn += 1
+    return groups
+
+
 def evaluate(windows, onsets):
     """Calcule les stats par type de faute pour static et layered + FP + lead time."""
     per_type = {}          # fault_type -> {'static':Stat,'layered':Stat}
@@ -288,33 +315,46 @@ def _fmtn(v):
     return f"{v:.0f}" if isinstance(v, (int, float)) else "-"
 
 
-def persist(conn, input_set, per_type, fp, span_hours):
-    """Ecrit les resultats dans eval_runs (une ligne par fault_type + OVERALL)."""
+def persist(conn, input_set, per_type, fp, span_hours, mag_groups=None):
+    """Ecrit dans eval_runs : par fault_type (magnitude='all'), OVERALL, et par
+    (fault_type, magnitude) pour la courbe de sensibilite."""
     run_id = str(uuid.uuid4())
     cur = conn.cursor()
-    tot_tp = tot_fn = 0
+
+    def ins(ft, mag, s, l, n, fps=None, fpl=None, fphs=None, fphl=None):
+        cur.execute("""
+            INSERT INTO eval_runs (run_id, input_set, fault_type, magnitude, n,
+                                   dr_static, dr_layered, delay_static_s, delay_layered_s,
+                                   fp_static, fp_layered, fp_per_hour_static, fp_per_hour_layered,
+                                   span_hours)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """, (run_id, input_set, ft, mag, n, _rate(s), _rate(l),
+              _med(s.delays), _med(l.delays), fps, fpl, fphs, fphl, span_hours))
+
+    tot_tp = tot_fn = ov_static = ov_static_fn = 0
     all_ds, all_dl = [], []
     for ft in sorted(per_type):
         s, l = per_type[ft]["static"], per_type[ft]["layered"]
-        n = s.tp + s.fn
+        ins(ft, "all", s, l, s.tp + s.fn)
         tot_tp += l.tp; tot_fn += l.fn
+        ov_static += s.tp; ov_static_fn += s.fn
         all_ds += s.delays; all_dl += l.delays
-        cur.execute("""
-            INSERT INTO eval_runs (run_id, input_set, fault_type, n, dr_static, dr_layered,
-                                   delay_static_s, delay_layered_s, span_hours)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-        """, (run_id, input_set, ft, n, _rate(s), _rate(l),
-              _med(s.delays), _med(l.delays), span_hours))
-    # Ligne OVERALL (avec les faux positifs, globaux par nature).
-    ov_static = sum(per_type[ft]["static"].tp for ft in per_type)
-    ov_static_fn = sum(per_type[ft]["static"].fn for ft in per_type)
+
+    # Sensibilite : lignes par (fault_type, magnitude).
+    for (ft, mag), g in sorted((mag_groups or {}).items()):
+        if mag == "all":
+            continue
+        s, l = g["static"], g["layered"]
+        ins(ft, mag, s, l, s.tp + s.fn)
+
+    # Ligne OVERALL (faux positifs globaux).
     dr_static_all = ov_static / (ov_static + ov_static_fn) if (ov_static + ov_static_fn) else None
     dr_layered_all = tot_tp / (tot_tp + tot_fn) if (tot_tp + tot_fn) else None
     cur.execute("""
-        INSERT INTO eval_runs (run_id, input_set, fault_type, n, dr_static, dr_layered,
+        INSERT INTO eval_runs (run_id, input_set, fault_type, magnitude, n, dr_static, dr_layered,
                                delay_static_s, delay_layered_s, fp_static, fp_layered,
                                fp_per_hour_static, fp_per_hour_layered, span_hours)
-        VALUES (%s,%s,'OVERALL',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        VALUES (%s,%s,'OVERALL','all',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
     """, (run_id, input_set, ov_static + ov_static_fn, dr_static_all, dr_layered_all,
           _med(all_ds), _med(all_dl), fp["static"], fp["layered"],
           fp["static"] / span_hours if span_hours else None,
@@ -322,6 +362,15 @@ def persist(conn, input_set, per_type, fp, span_hours):
     conn.commit()
     cur.close()
     print(f"\nResultats persistes dans eval_runs (run_id={run_id})")
+
+
+def print_sensitivity(mag_groups):
+    """Courbe de sensibilite : detection rate par (fault_type, magnitude)."""
+    print(f"\n{'fault_type':<20} {'magnitude':>9} {'n':>3}  {'DR static':>9} {'DR layered':>10}")
+    print("-" * 58)
+    for (ft, mag) in sorted(mag_groups):
+        s, l = mag_groups[(ft, mag)]["static"], mag_groups[(ft, mag)]["layered"]
+        print(f"{ft:<20} {mag:>9} {s.tp + s.fn:>3}  {_fmt(_rate(s)):>9} {_fmt(_rate(l)):>10}")
 
 
 def main():
@@ -354,10 +403,16 @@ def main():
     per_type, fp, lead_times = evaluate(windows, onsets)
     print_report(per_type, fp, lead_times, span_hours)
 
+    # Courbe de sensibilite : detection rate par (fault_type, magnitude).
+    mag_groups = group_stats(windows, onsets, lambda w: (w.fault_type, magnitude_of(w)))
+    if any(mag != "all" for _, mag in mag_groups):
+        print("\n=== Sensibilite (detection rate par magnitude) ===")
+        print_sensitivity(mag_groups)
+
     if args.persist:
         conn2 = psycopg2.connect(DB_URL)
         try:
-            persist(conn2, str(args.input), per_type, fp, span_hours)
+            persist(conn2, str(args.input), per_type, fp, span_hours, mag_groups)
         finally:
             conn2.close()
 
