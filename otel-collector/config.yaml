@@ -7,6 +7,12 @@ receivers:
         endpoint: 0.0.0.0:4318
 
 processors:
+  # PII redaction (spec 5.1 / 12). Denylist des attributs porteurs de PII connus.
+  # NOTE securite : le spec preconise une ALLOWLIST (redaction/pii, allow_all_keys:
+  # false). Tentee et REVERTEE ici car le processor `redaction` supprime aussi les
+  # attributs de ressource (dont service.name), ce qui casse les dimensions
+  # spanmetrics et le label service_name. A reintroduire avec une allowlist incluant
+  # les cles de ressource requises + validation du pipeline (voir docs/security.md).
   attributes/pii_redaction:
     actions:
       - key: http.url
