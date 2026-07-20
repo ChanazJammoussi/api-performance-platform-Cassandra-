@@ -14,9 +14,13 @@ Lancement : python baseline_job.py          (run-once)
 """
 
 import argparse
+import glob
+import json
 import os
 import logging
 import time
+from datetime import datetime, timezone, timedelta
+
 import psycopg2
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -29,6 +33,46 @@ MIN_SAMPLES = 10
 
 # Fenetre historique utilisee pour le calcul
 LOOKBACK_DAYS = 14
+
+# Repertoire des ground truth JSON (fenetres d'injection a exclure), + marge pour
+# le residu de la faute dans les rates. Meme convention que train_model.py.
+RESULTS_DIR = os.environ.get(
+    "GROUND_TRUTH_DIR",
+    os.path.abspath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "scenario-runner", "results"
+    )),
+)
+INJECTION_MARGIN = timedelta(minutes=5)
+
+
+def load_injection_windows():
+    """
+    Fenetres [injected_at - marge, cleared_at + marge] de toutes les injections
+    ground-truth, en deux listes (starts, ends). Exclues du calcul de baseline :
+    une baseline saisonniere doit representer le comportement NORMAL, pas les fautes
+    injectees (spec 8.1). Meme exclusion que train_model.py, pour la coherence.
+    """
+    starts, ends = [], []
+    for path in glob.glob(os.path.join(RESULTS_DIR, "**", "*.json"), recursive=True):
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            faults = data["faults"] if isinstance(data, dict) and "faults" in data else data
+            if not isinstance(faults, list):
+                continue
+            for e in faults:
+                ia, ca = e.get("injected_at"), e.get("cleared_at")
+                if not ia or not ca:
+                    continue
+                a = datetime.fromisoformat(ia)
+                b = datetime.fromisoformat(ca)
+                if a.tzinfo is None: a = a.replace(tzinfo=timezone.utc)
+                if b.tzinfo is None: b = b.replace(tzinfo=timezone.utc)
+                starts.append(a - INJECTION_MARGIN)
+                ends.append(b + INJECTION_MARGIN)
+        except Exception as e:
+            log.warning(f"Ground truth illisible {path}: {e}")
+    return starts, ends
 
 # Metriques a calculer et la colonne source correspondante dans endpoint_features
 METRICS = {
@@ -57,6 +101,12 @@ WHERE
     time >= NOW() - INTERVAL '{days} days'
     AND {col} IS NOT NULL
     AND {col} < 'NaN'::float8  -- Exclude NaN values before percentile computation
+    -- Exclut les fenetres d'injection : la baseline doit refleter le trafic normal.
+    AND NOT EXISTS (
+        SELECT 1
+        FROM unnest(%(win_starts)s::timestamptz[], %(win_ends)s::timestamptz[]) AS w(s, e)
+        WHERE endpoint_features.time BETWEEN w.s AND w.e
+    )
 GROUP BY endpoint_id, dow, hour_bucket
 HAVING COUNT(*) >= {min_samples}
 ON CONFLICT (endpoint_id, metric, dow, hour_bucket)
@@ -73,13 +123,16 @@ def run_baseline(conn):
     cur = conn.cursor()
     total_upserted = 0
 
+    win_starts, win_ends = load_injection_windows()
+    log.info(f"Fenetres d'injection exclues : {len(win_starts)}")
+
     for metric, col in METRICS.items():
         sql = UPSERT_SQL.format(
             col=col,
             days=LOOKBACK_DAYS,
             min_samples=MIN_SAMPLES,
         )
-        cur.execute(sql, {"metric": metric})
+        cur.execute(sql, {"metric": metric, "win_starts": win_starts, "win_ends": win_ends})
         upserted = cur.rowcount
         total_upserted += upserted
         log.info(f"  {metric:<20s} : {upserted} buckets upserted")

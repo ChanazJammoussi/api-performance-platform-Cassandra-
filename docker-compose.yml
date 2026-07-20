@@ -126,6 +126,9 @@ services:
       - timescaledb
     environment:
       - DATABASE_URL=postgresql://cassandra:cassandra@timescaledb:5432/cassandra
+      - GROUND_TRUTH_DIR=/data/results
+    volumes:
+      - ./scenario-runner/results:/data/results:ro
 
   deploy-api:
     build: ./detection-service
