@@ -10,6 +10,7 @@ venv/
 !scenario-runner/ground_truth_test.json
 !grafana/provisioning/dashboards/cassandra_dashboard.json
 !grafana/provisioning/dashboards/cassandra_eval_dashboard.json
+!grafana/provisioning/dashboards/cassandra_selfobs_dashboard.json
 
 # OS
 .DS_Store

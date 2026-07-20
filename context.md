@@ -252,7 +252,11 @@ Datasource TimescaleDB (provisionnée). Deux dashboards dans
   depuis la table `anomalies`), annotations **alertes** (FIRING/RESOLVED) et **déploiements**.
 - **Cassandra - Evaluation (layered vs static)** (`cassandra-eval-v1`) : lit `eval_runs`
   (dernière campagne) — detection rate static vs layered par type de faute (barchart + table),
-  FP/h, délais. Alimenté par `evaluate_layered.py --persist`.
+  **courbe de sensibilité** (par magnitude core/stress), FP/h, délais. Alimenté par
+  `evaluate_layered.py --persist`.
+- **Cassandra - Self-observability** (`cassandra-selfobs-v1`, spec §11) : fraîcheur scraper /
+  détecteur (lag alerting visuel par seuils), cadence des cycles (~60s), taux de fallback LLM,
+  qualité d'alerte (transitions FIRING 24h, durée FIRING médiane, historique par couche).
 
 ## Load Testing (`k6/load.js`)
 
