@@ -459,4 +459,9 @@ Sequential phases, ~52 core days. Each phase ends with a demoable checkpoint.
   `deploy_events` n'a pas encore de colonne `kind` ; la corrélation n'utilise que la proximité
   temporelle (+ bonus service). Les priors par kind seront ajoutés quand `kind` sera introduit,
   après les premières mesures d'attribution.
+- **Tuning couche ML (§9.2) → contamination 0.02, seuil de déclenchement 0.60.** Balayage sur la
+  campagne (`tune_contamination.py`) : `contamination` est **inerte** (scikit-learn ne l'applique
+  qu'à `predict()`, pas à `score_samples()` que l'on calibre) → gardée au défaut 0.02. Le vrai
+  levier est le **seuil du score combiné** : F1 maximal à **0.60** (Recall 71 %, Precision 71 %,
+  1.45 FP/h) contre 0.698 à 0.50. À réviser après une campagne plus large.
 

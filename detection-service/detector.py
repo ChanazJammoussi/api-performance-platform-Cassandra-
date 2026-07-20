@@ -61,9 +61,11 @@ DB_URL = os.environ.get("DATABASE_URL", "postgresql://cassandra:cassandra@localh
 PENDING_WINDOWS = 2    # cycles avant FIRING
 RESOLVING_WINDOWS = 2  # cycles avant OK
 
-# Seuil de score combine pour declencher (le layer 1 a deviation>1.0 donne
-# baseline_norm=0.5, donc ce seuil preserve le declenchement baseline existant).
-FIRE_THRESHOLD = 0.5
+# Seuil de score combine pour declencher. Tune sur la campagne (tune_contamination.py,
+# spec 9.2) : F1 maximal a 0.60 (Recall 71%, Precision 71%, 1.45 FP/h) contre 0.698
+# a 0.50 -- 0.60 supprime un faux positif sans perdre de detection. Un depassement
+# SLO dur (layer 0) declenche de toute facon, independamment de ce seuil.
+FIRE_THRESHOLD = 0.6
 # Metriques dont la couche ML a besoin de la baseline saisonniere.
 ML_METRICS = ["p50_ms", "p95_ms", "p99_ms", "rps"]
 

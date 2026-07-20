@@ -204,7 +204,7 @@ sur une performance anormalement bonne (`improvement`).
 
 **Combinaison** : `combined = baseline_norm + (1 - baseline_norm) * ml_gated`, plancher par le
 dépassement SLO dur ; calibrée [0,1] contre la distribution trailing des scores. Déclenche si
-dépassement SLO **ou** `combined ≥ 0.5`.
+dépassement SLO **ou** `combined ≥ 0.6` (seuil tuné, cf. `tune_contamination.py`, §9.2).
 
 **Modèle** (`train_model.py`) : `IsolationForest` global entraîné sur l'historique
 `endpoint_features` en **excluant les fenêtres d'injection** (test set, jamais en entraînement).

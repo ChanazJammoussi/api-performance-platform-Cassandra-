@@ -56,7 +56,7 @@ DEFAULT_INPUT = os.environ.get(
 )
 
 M_WINDOWS = 2                     # hysteresis (= PENDING_WINDOWS de detector.py)
-FIRE_THRESHOLD = 0.5              # seuil de score combine (= detector.py)
+FIRE_THRESHOLD = 0.6              # seuil de score combine (= detector.py, tune spec 9.2)
 GRACE = timedelta(seconds=120)   # fenetre de grace apres cleared_at (= evaluation.py)
 PAD = timedelta(minutes=10)      # marge autour de la campagne pour charger les features
 
