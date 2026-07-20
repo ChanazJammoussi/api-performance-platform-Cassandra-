@@ -241,6 +241,11 @@ docker compose run --rm trainer python evaluate_layered.py --input /data/results
 docker compose run --rm trainer python evaluate_layered.py --persist
 ```
 
+`explanation_rubric.py` (spec §9.2) score un échantillon d'explications
+(`alerts.explanation`) sur une rubrique (structure, chiffres cohérents, actionnabilité
+des checks, cadrage de l'incertitude) — proxys objectifs, l'appréciation finale restant
+subjective. `docker compose run --rm trainer python explanation_rubric.py`.
+
 ## Dashboards Grafana (spec 5.9 / 9.3)
 
 Datasource TimescaleDB (provisionnée). Deux dashboards dans
