@@ -170,3 +170,28 @@ SELECT create_hypertable('anomalies', 'detected_at', if_not_exists => TRUE);
 
 CREATE INDEX IF NOT EXISTS idx_anomalies_endpoint_time
     ON anomalies (endpoint_id, detected_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- eval_runs : resultats de campagne d'evaluation (spec 9.3). Une ligne par
+-- (run, fault_type), plus une ligne fault_type='OVERALL' agregee. Ecrite par
+-- evaluate_layered.py --persist, lue par le dashboard d'evaluation Grafana.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS eval_runs (
+    run_id              UUID NOT NULL DEFAULT gen_random_uuid(),
+    run_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    input_set           TEXT,
+    fault_type          TEXT NOT NULL,
+    n                   INTEGER,
+    dr_static           DOUBLE PRECISION,   -- detection rate static (layer 0)
+    dr_layered          DOUBLE PRECISION,   -- detection rate layered (baseline+ML)
+    delay_static_s      DOUBLE PRECISION,
+    delay_layered_s     DOUBLE PRECISION,
+    fp_static           INTEGER,            -- rempli sur la ligne OVERALL
+    fp_layered          INTEGER,
+    fp_per_hour_static  DOUBLE PRECISION,
+    fp_per_hour_layered DOUBLE PRECISION,
+    span_hours          DOUBLE PRECISION,
+    PRIMARY KEY (run_id, fault_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_eval_runs_time ON eval_runs (run_at DESC);

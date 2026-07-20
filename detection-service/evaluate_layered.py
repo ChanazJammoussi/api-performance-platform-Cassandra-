@@ -29,6 +29,7 @@ import json
 import os
 import statistics
 import sys
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -287,10 +288,48 @@ def _fmtn(v):
     return f"{v:.0f}" if isinstance(v, (int, float)) else "-"
 
 
+def persist(conn, input_set, per_type, fp, span_hours):
+    """Ecrit les resultats dans eval_runs (une ligne par fault_type + OVERALL)."""
+    run_id = str(uuid.uuid4())
+    cur = conn.cursor()
+    tot_tp = tot_fn = 0
+    all_ds, all_dl = [], []
+    for ft in sorted(per_type):
+        s, l = per_type[ft]["static"], per_type[ft]["layered"]
+        n = s.tp + s.fn
+        tot_tp += l.tp; tot_fn += l.fn
+        all_ds += s.delays; all_dl += l.delays
+        cur.execute("""
+            INSERT INTO eval_runs (run_id, input_set, fault_type, n, dr_static, dr_layered,
+                                   delay_static_s, delay_layered_s, span_hours)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """, (run_id, input_set, ft, n, _rate(s), _rate(l),
+              _med(s.delays), _med(l.delays), span_hours))
+    # Ligne OVERALL (avec les faux positifs, globaux par nature).
+    ov_static = sum(per_type[ft]["static"].tp for ft in per_type)
+    ov_static_fn = sum(per_type[ft]["static"].fn for ft in per_type)
+    dr_static_all = ov_static / (ov_static + ov_static_fn) if (ov_static + ov_static_fn) else None
+    dr_layered_all = tot_tp / (tot_tp + tot_fn) if (tot_tp + tot_fn) else None
+    cur.execute("""
+        INSERT INTO eval_runs (run_id, input_set, fault_type, n, dr_static, dr_layered,
+                               delay_static_s, delay_layered_s, fp_static, fp_layered,
+                               fp_per_hour_static, fp_per_hour_layered, span_hours)
+        VALUES (%s,%s,'OVERALL',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+    """, (run_id, input_set, ov_static + ov_static_fn, dr_static_all, dr_layered_all,
+          _med(all_ds), _med(all_dl), fp["static"], fp["layered"],
+          fp["static"] / span_hours if span_hours else None,
+          fp["layered"] / span_hours if span_hours else None, span_hours))
+    conn.commit()
+    cur.close()
+    print(f"\nResultats persistes dans eval_runs (run_id={run_id})")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, default=Path(DEFAULT_INPUT))
     parser.add_argument("--output", type=Path, help="Rapport JSON optionnel")
+    parser.add_argument("--persist", action="store_true",
+                        help="Ecrit les resultats dans la table eval_runs (dashboard Grafana)")
     args = parser.parse_args()
 
     windows = load_windows(args.input)
@@ -314,6 +353,13 @@ def main():
     onsets = build_onsets(by_ep, exact, fallback, model_bundle)
     per_type, fp, lead_times = evaluate(windows, onsets)
     print_report(per_type, fp, lead_times, span_hours)
+
+    if args.persist:
+        conn2 = psycopg2.connect(DB_URL)
+        try:
+            persist(conn2, str(args.input), per_type, fp, span_hours)
+        finally:
+            conn2.close()
 
     if args.output:
         payload = {

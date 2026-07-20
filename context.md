@@ -237,7 +237,22 @@ délai, lead time) + FP/h. Un onset n'est FP que si aucune injection n'est activ
 # Table de comparaison sur la campagne structuree (defaut)
 docker compose run --rm trainer python evaluate_layered.py
 docker compose run --rm trainer python evaluate_layered.py --input /data/results/<...> --output rapport.json
+# --persist ecrit les resultats dans la table eval_runs (dashboard Grafana d'evaluation)
+docker compose run --rm trainer python evaluate_layered.py --persist
 ```
+
+## Dashboards Grafana (spec 5.9 / 9.3)
+
+Datasource TimescaleDB (provisionnée). Deux dashboards dans
+`grafana/provisioning/dashboards/` :
+
+- **Cassandra - API Performance & Alerting** (`cassandra-main-v1`) : santé par endpoint
+  (latence p99/p50 + bande baseline saisonnière, erreurs, RPS), table des alertes,
+  historique FIRING + explication LLM, **score anomalie par couche** (static/baseline/iforest
+  depuis la table `anomalies`), annotations **alertes** (FIRING/RESOLVED) et **déploiements**.
+- **Cassandra - Evaluation (layered vs static)** (`cassandra-eval-v1`) : lit `eval_runs`
+  (dernière campagne) — detection rate static vs layered par type de faute (barchart + table),
+  FP/h, délais. Alimenté par `evaluate_layered.py --persist`.
 
 ## Load Testing (`k6/load.js`)
 

@@ -40,6 +40,20 @@
         "rawSql": "SELECT resolved_at AS time, endpoint_id || ' RESOLVED' AS text, 'RESOLVED' AS tags FROM alerts WHERE resolved_at IS NOT NULL AND resolved_at BETWEEN $__timeFrom() AND $__timeTo() AND endpoint_id = '$endpoint' ORDER BY resolved_at",
         "showIn": 0,
         "type": "tags"
+      },
+      {
+        "datasource": {
+          "type": "postgres",
+          "uid": "DS_TIMESCALEDB"
+        },
+        "enable": true,
+        "hide": false,
+        "iconColor": "#FFA6B0",
+        "name": "Deploys",
+        "rawQuery": true,
+        "rawSql": "SELECT deployed_at AS time, service || ' ' || version AS text, 'deploy' AS tags FROM deploy_events WHERE deployed_at BETWEEN $__timeFrom() AND $__timeTo() ORDER BY deployed_at",
+        "showIn": 0,
+        "type": "tags"
       }
     ]
   },
@@ -1322,7 +1336,7 @@
         },
         "textMode": "auto"
       },
-      "title": "FP derni\u00e8res 24h",
+      "title": "FP dernières 24h",
       "type": "stat",
       "targets": [
         {
@@ -1457,6 +1471,147 @@
           "rawQuery": true,
           "rawSql": "SELECT endpoint_id, signal_type, state, severity, ROUND(score::numeric, 3) AS score, suspected_fault, ROUND(imputation_score::numeric, 2) AS imputation_score, explanation->>'summary' AS explication_llm, opened_at, resolved_at FROM alerts WHERE state IN ('firing','resolving','ok') AND opened_at IS NOT NULL AND $__timeFilter(opened_at) ORDER BY opened_at DESC LIMIT 50",
           "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 58
+      },
+      "id": 106,
+      "panels": [],
+      "title": "Score anomalie par couche (Phase 3 -- anomaly store)",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "DS_TIMESCALEDB"
+      },
+      "description": "Score combine calibre et contribution par couche (static / baseline / iforest) depuis la table anomalies. Direction gating : iforest ne contribue qu'en degradation.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "min": 0,
+          "max": 1,
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "combined"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FF9830",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "iforest"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#8AB8FF",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "baseline"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#73BF69",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "static"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#B877D9",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 59
+      },
+      "id": 107,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "title": "Score anomalie par couche (anomaly store) -- $endpoint",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "DS_TIMESCALEDB"
+          },
+          "rawQuery": true,
+          "rawSql": "SELECT detected_at AS time, score AS combined, (contributing_features->'layers'->>'static')::float AS static, (contributing_features->'layers'->>'baseline')::float AS baseline, (contributing_features->'layers'->>'iforest')::float AS iforest FROM anomalies WHERE endpoint_id = '$endpoint' AND signal_type = '$signal' AND $__timeFilter(detected_at) ORDER BY detected_at",
+          "format": "time_series",
           "refId": "A"
         }
       ]
