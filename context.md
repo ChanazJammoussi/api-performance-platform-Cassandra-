@@ -220,6 +220,25 @@ via le service `trainer`. Le `detector` recharge l'artefact quand `latest` chang
 docker compose run --rm trainer python train_model.py
 ```
 
+## Évaluation layered vs static (spec 9)
+
+`evaluation.py` matche les alertes live (table `alerts`) au ground-truth :
+detection rate, FP/h, délai médian, attribution.
+
+`evaluate_layered.py` produit le **livrable phare** (§9.3) : il **rejoue hors-ligne**
+les deux détecteurs sur l'historique `endpoint_features` — *static* (seuils SLO,
+layer 0) et *layered* (baseline + Isolation Forest + direction gating) — avec la
+même logique de score que `detector.py`, applique l'hystérésis, puis matche le
+ground-truth. Sortie : table de comparaison par type de faute (detection rate,
+délai, lead time) + FP/h. Un onset n'est FP que si aucune injection n'est active
+(les cascades ne sont pas des faux positifs).
+
+```bash
+# Table de comparaison sur la campagne structuree (defaut)
+docker compose run --rm trainer python evaluate_layered.py
+docker compose run --rm trainer python evaluate_layered.py --input /data/results/<...> --output rapport.json
+```
+
 ## Load Testing (`k6/load.js`)
 
 Simule une **journée compressée en 2 heures** avec courbe sinusoïdale (5 à 50 VUs).
