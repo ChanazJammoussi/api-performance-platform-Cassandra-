@@ -607,6 +607,223 @@
           "rawSql": "SELECT fired_at AS time, endpoint_id, signal_type, severity, layer, suspected_fault FROM alerts_history WHERE $__timeFilter(fired_at) ORDER BY fired_at DESC LIMIT 50"
         }
       ]
+    },
+    {
+      "type": "row",
+      "title": "Sante du modele ML (drift)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      },
+      "id": 12,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Drift ML (KS)",
+      "datasource": {
+        "type": "postgres",
+        "uid": "DS_TIMESCALEDB"
+      },
+      "description": "Statistique KS entre la distribution des scores ML live et la reference d'entrainement. Rouge >= 0.30 = drift.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.3
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 25
+      },
+      "id": 13,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "DS_TIMESCALEDB"
+          },
+          "rawQuery": true,
+          "rawSql": "SELECT now() AS time, ks_drift AS value FROM model_health ORDER BY checked_at DESC LIMIT 1",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Taux anomalie live",
+      "datasource": {
+        "type": "postgres",
+        "uid": "DS_TIMESCALEDB"
+      },
+      "description": "Fraction des scores ML live >= 0.5. A comparer a la contamination d'entrainement (~2%).",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.1
+              },
+              {
+                "color": "red",
+                "value": 0.25
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 6,
+        "y": 25
+      },
+      "id": 14,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "DS_TIMESCALEDB"
+          },
+          "rawQuery": true,
+          "rawSql": "SELECT now() AS time, live_anomaly_rate AS value FROM model_health ORDER BY checked_at DESC LIMIT 1",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Drift ML (KS) dans le temps",
+      "datasource": {
+        "type": "postgres",
+        "uid": "DS_TIMESCALEDB"
+      },
+      "description": "Evolution du KS de drift. Franchir 0.30 declenche un reentrainement (audit #10/#13).",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "auto",
+            "spanNulls": true
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.3
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 25
+      },
+      "id": 15,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "DS_TIMESCALEDB"
+          },
+          "rawQuery": true,
+          "format": "time_series",
+          "refId": "A",
+          "rawSql": "SELECT checked_at AS time, ks_drift AS \"KS drift\" FROM model_health WHERE $__timeFilter(checked_at) ORDER BY checked_at"
+        }
+      ]
     }
   ]
 }

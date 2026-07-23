@@ -130,6 +130,21 @@ services:
     volumes:
       - ./scenario-runner/results:/data/results:ro
 
+  # --- Monitoring du drift du modele ML (audit #10) -------------------------
+  # Compare periodiquement la distribution des scores ML live a la reference
+  # d'entrainement (KS) et ecrit dans model_health (dashboard self-obs).
+  model-monitor:
+    build: ./detection-service
+    container_name: cassandra-model-monitor
+    command: ["python", "-u", "model_monitor.py", "--loop", "--interval", "1800"]
+    depends_on:
+      - timescaledb
+    environment:
+      - DATABASE_URL=postgresql://cassandra:cassandra@timescaledb:5432/cassandra
+      - MODEL_DIR=/app/models
+    volumes:
+      - models_data:/app/models
+
   deploy-api:
     build: ./detection-service
     container_name: cassandra-deploy-api

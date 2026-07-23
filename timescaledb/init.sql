@@ -198,6 +198,26 @@ CREATE TABLE IF NOT EXISTS eval_runs (
 CREATE INDEX IF NOT EXISTS idx_eval_runs_time ON eval_runs (run_at DESC);
 
 -- ---------------------------------------------------------------------------
+-- model_health : surveillance du drift du modele ML en production (audit #10).
+-- Une ligne par verification : compare la distribution des scores ML live a la
+-- distribution de reference (fenetre figee) via la statistique KS. Alimente par
+-- model_monitor.py, lue par le dashboard self-observabilite.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS model_health (
+    checked_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    model_trained_at   TIMESTAMPTZ,
+    n_live             INTEGER,
+    ks_drift           DOUBLE PRECISION,   -- KS(reference, live) ; grand = drift
+    ref_mean           DOUBLE PRECISION,
+    live_mean          DOUBLE PRECISION,
+    live_p95           DOUBLE PRECISION,
+    live_anomaly_rate  DOUBLE PRECISION,   -- fraction de ml_norm >= 0.5 en live
+    drift_flag         BOOLEAN
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_health_time ON model_health (checked_at DESC);
+
+-- ---------------------------------------------------------------------------
 -- Compression + retention des hypertables time-series (perf + espace disque).
 -- Ces tables sont append-only (jamais d'UPDATE sur les vieilles lignes), donc la
 -- compression est sans risque : on compresse les chunks > 7 jours et on purge

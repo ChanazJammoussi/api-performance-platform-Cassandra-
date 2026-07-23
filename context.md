@@ -220,6 +220,13 @@ haussière, extrapolation Theil-Sen vers le SLO → `ttd_minutes` avec intervall
 (dispersion des pentes). **Advisory uniquement** (extrapolation de tendance, jamais
 garantie). Exposé dans `contributing_features.ttd`, en ligne Slack et sur un stat Grafana.
 
+**Monitoring du drift** (`model_monitor.py`, service `model-monitor`) : le sanity-gate
+compare les distributions à l'entraînement ; ce moniteur surveille la dérive **après
+déploiement**. Il compare la distribution des scores ML **live** (`anomalies.ml_norm`,
+24 h) à la **référence** figée (`reference_window`) via KS, écrit dans `model_health`
+(KS, taux d'anomalie live, flag), et l'expose sur le dashboard self-observabilité
+(KS ≥ 0.30 = drift → signal de réentraînement). Boucle toutes les 30 min.
+
 ```bash
 # Entraîner un modèle manuellement (run-once)
 docker compose run --rm trainer python train_model.py
