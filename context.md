@@ -275,6 +275,19 @@ Datasource TimescaleDB (provisionnée). Deux dashboards dans
   détecteur (lag alerting visuel par seuils), cadence des cycles (~60s), taux de fallback LLM,
   qualité d'alerte (transitions FIRING 24h, durée FIRING médiane, historique par couche).
 
+## Tests (`detection-service/tests/`)
+
+Suite **pytest** sur la logique pure (sans DB) : features (Theil-Sen, déviations,
+direction), TTD, calibration/KS/sanity-gate/attribution ML, baseline_utils (pg_dow,
+déviation), scoring de corrélation, et logique d'évaluation (hystérésis, matching,
+magnitude). **68 tests**. CI GitHub Actions (`.github/workflows/ci.yml`) à chaque push/PR.
+
+```bash
+# Localement (deps ML dans l'image trainer)
+docker compose run --rm -v "$PWD/detection-service:/app" trainer \
+  sh -c "pip install -q pytest && cd /app && python -m pytest"
+```
+
 ## Load Testing (`k6/load.js`)
 
 Simule une **journée compressée en 2 heures** avec courbe sinusoïdale (5 à 50 VUs).
