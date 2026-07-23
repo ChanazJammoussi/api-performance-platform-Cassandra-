@@ -251,6 +251,13 @@ docker compose run --rm trainer python evaluate_layered.py --persist
 des checks, cadrage de l'incertitude) — proxys objectifs, l'appréciation finale restant
 subjective. `docker compose run --rm trainer python explanation_rubric.py`.
 
+`compare_supervised.py` (spec §8.2, stretch) compare un modèle **supervisé** (gradient
+boosting sklearn, équivalent XGBoost sans dépendance lourde) au **non-supervisé**
+(Isolation Forest) sur un split temporel 50/50 des features étiquetées par le ground-truth.
+Résultat mesuré : PR-AUC quasi identique (0.164 vs 0.167) — le supervisé n'apporte pas
+d'avantage décisif, ce qui justifie le choix non-supervisé (labels rares, sur-apprentissage
+des fautes synthétiques, consommation du jeu de test). Expérience documentée, non shippée.
+
 ## Dashboards Grafana (spec 5.9 / 9.3)
 
 Datasource TimescaleDB (provisionnée). Deux dashboards dans
