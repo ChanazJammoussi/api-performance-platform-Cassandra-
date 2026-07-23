@@ -16,7 +16,10 @@ directement mesurables — et comparables à un détecteur à seuils statiques.
 docker compose up -d --build          # toute la stack
 k6 run k6/load.js                     # trafic (journée compressée en 2 h)
 
-# Injecter un scénario (depuis scenario-runner/)
+# Démo bout-en-bout scriptée (trafic → deploy → injection → détection → attribution)
+bash scripts/demo.sh
+
+# Injecter un scénario manuellement (depuis scenario-runner/)
 python runner.py scenarios/bad_deploy.yaml
 
 # Interfaces
