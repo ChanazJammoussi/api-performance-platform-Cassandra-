@@ -55,6 +55,7 @@ State machine anti-flapping (OK→PENDING→FIRING→RESOLVING). Voir
 
 | Document | Contenu |
 |---|---|
+| [`docs/results.md`](docs/results.md) | **Synthèse des résultats + messages clés** (soutenance) |
 | [`docs/architecture.md`](docs/architecture.md) | Diagrammes (flux, couches, state machine, séquence, ML, données) |
 | [`docs/design-spec.md`](docs/design-spec.md) | Spec de conception (référence contraignante) + décisions |
 | [`docs/security.md`](docs/security.md) | Audit de sécurité (§12) |
