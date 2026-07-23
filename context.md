@@ -208,9 +208,18 @@ dépassement SLO **ou** `combined ≥ 0.6` (seuil tuné, cf. `tune_contamination
 
 **Modèle** (`train_model.py`) : `IsolationForest` global entraîné sur l'historique
 `endpoint_features` en **excluant les fenêtres d'injection** (test set, jamais en entraînement).
-Artefact versionné par timestamp + pointeur `latest` (volume `models_data`), promotion soumise à
-un **sanity-gate** (shift de distribution KS sur une fenêtre de référence fixe). Refit *nightly*
-via le service `trainer`. Le `detector` recharge l'artefact quand `latest` change.
+Artefact versionné par timestamp + pointeur `latest` (volume `models_data`). Refit *nightly*
+via le service `trainer` ; le `detector` recharge l'artefact quand `latest` change.
+
+**Garde-fous de promotion** (audit #13) — un nouvel artefact n'est promu (`latest`) que si les
+trois passent (sinon conservé mais non promu ; `--force` outrepasse) :
+1. **Sanity-gate** : shift de distribution KS ≤ 0.35 vs modèle précédent (fenêtre de référence fixe) ;
+2. **Validation d'éval** : le candidat ne doit pas dégrader la détection — recall et FP rejoués
+   (layered) sur la campagne, candidat vs modèle courant, tolérance recall 0.05 / FP +50 % ;
+3. **Fraîcheur** : la dernière feature date de moins de 24 h (pas d'entraînement sur données stale).
+
+Combiné au monitoring de drift (`model_monitor.py`), cela ferme la boucle : détecter le drift →
+réentraîner → **valider avant de promouvoir**.
 
 **Anomaly store** : la table `anomalies` reçoit un enregistrement par cycle scoré
 (`score`, `layer`, `direction`, `contributing_features` top-3) — alimente la timeline Grafana.

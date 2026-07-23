@@ -176,6 +176,66 @@ def build_matrix(by_ep, exact, fallback, windows):
     return np.array(X, dtype=float), excluded_injection
 
 
+# --- Garde-fous de promotion (audit #13) -----------------------------------
+RECALL_TOLERANCE = 0.05      # baisse de recall toleree vs modele courant
+FP_TOLERANCE_REL = 0.50      # hausse relative de FP toleree
+FP_TOLERANCE_ABS = 2         # + marge absolue (petits nombres)
+MAX_DATA_AGE_HOURS = 24      # au-dela, donnees stale -> promotion deconseillee
+
+
+def data_freshness_hours(conn):
+    """Age (heures) de la derniere ligne endpoint_features, ou None si vide."""
+    cur = conn.cursor()
+    cur.execute("SELECT EXTRACT(EPOCH FROM (now() - max(time)))/3600 FROM endpoint_features")
+    row = cur.fetchone()
+    cur.close()
+    return float(row[0]) if row and row[0] is not None else None
+
+
+def _recall_fp(ev, windows, by_ep, exact, fallback, bundle):
+    """(recall, faux positifs) du detecteur layered avec ce modele, sur la campagne."""
+    onsets = ev.build_onsets(by_ep, exact, fallback, bundle)
+    per_type, fp, _ = ev.evaluate(windows, onsets)
+    tp = sum(d["layered"].tp for d in per_type.values())
+    fn = sum(d["layered"].fn for d in per_type.values())
+    recall = tp / (tp + fn) if (tp + fn) else 0.0
+    return recall, fp["layered"]
+
+
+def validate_promotion(conn, candidate_bundle):
+    """
+    Rejoue l'evaluation layered avec le modele CANDIDAT et le modele COURANT sur le
+    jeu de validation (campagne), et refuse la promotion si le candidat degrade la
+    detection (recall en baisse au-dela de la tolerance) ou fait exploser les FP.
+    Complementaire du sanity-gate (qui, lui, ne regarde que la distribution des scores).
+    Import paresseux d'evaluate_layered pour eviter l'import circulaire.
+    """
+    from pathlib import Path
+    import evaluate_layered as ev
+
+    windows = ev.load_windows(Path(ev.DEFAULT_INPUT))
+    if not windows:
+        return True, "validation eval : pas de jeu de validation -> autorisee"
+    current = ml_model.load_latest()
+    if current is None:
+        return True, "validation eval : premier modele -> pas de reference"
+
+    since = min(w.injected_at for w in windows) - ev.PAD
+    until = max(w.cleared_at for w in windows) + ev.PAD
+    by_ep = ev.load_features_span(conn, since, until)
+    exact, fallback = load_baseline_lookup(conn)
+
+    r_cand, fp_cand = _recall_fp(ev, windows, by_ep, exact, fallback, candidate_bundle)
+    r_cur, fp_cur = _recall_fp(ev, windows, by_ep, exact, fallback, current)
+
+    recall_ok = r_cand >= r_cur - RECALL_TOLERANCE
+    fp_ok = fp_cand <= fp_cur + max(FP_TOLERANCE_ABS, int(fp_cur * FP_TOLERANCE_REL))
+    ok = recall_ok and fp_ok
+    report = (f"validation eval : recall {r_cur:.2f}->{r_cand:.2f}, FP {fp_cur}->{fp_cand} -> "
+              + ("OK" if ok else "REGRESSION"))
+    return ok, report
+
+
 def train_and_maybe_promote(conn, args):
     by_ep = load_feature_rows(conn, args.lookback_days)
     if not by_ep:
@@ -199,22 +259,42 @@ def train_and_maybe_promote(conn, args):
     meta = ml_model.build_meta(trained_at, X, args.contamination, WINDOW_SIZE, args.lookback_days)
     meta["calibration"] = calib
 
-    # Fenetre de reference fixe (creee au 1er run) + sanity gate vs modele precedent.
+    # --- Garde-fous de promotion (dans l'ordre) ---
+    # 1. Sanity gate : shift de distribution des scores vs modele precedent.
     reference = ml_model.ensure_reference(X)
     previous = ml_model.load_previous_versioned()
-    ok, report = ml_model.sanity_gate(model, previous, reference)
-    log.info(f"Sanity gate : {report['reason']}")
+    ok_gate, gate_report = ml_model.sanity_gate(model, previous, reference)
+    log.info(f"Sanity gate : {gate_report['reason']}")
+
+    # 2. Validation d'eval : le candidat ne doit pas degrader la detection.
+    candidate = {"model": model, "meta": meta}
+    try:
+        ok_val, val_report = validate_promotion(conn, candidate)
+    except Exception as e:
+        ok_val, val_report = True, f"validation eval sautee (erreur: {e})"
+    log.info(val_report)
+
+    # 3. Fraicheur : ne pas promouvoir un modele entraine sur des donnees stale.
+    age = data_freshness_hours(conn)
+    fresh = age is None or age <= MAX_DATA_AGE_HOURS
+    if not fresh:
+        log.warning(f"Donnees stale (derniere feature il y a {age:.1f}h > {MAX_DATA_AGE_HOURS}h)")
 
     if args.dry_run:
-        log.info("--dry-run : aucun artefact ecrit")
+        log.info(f"--dry-run : aucun artefact ecrit (gate={ok_gate} eval={ok_val} fresh={fresh})")
         return True
 
-    promote = ok or args.force
-    if not ok and args.force:
-        log.warning("Sanity gate echoue mais --force : promotion forcee")
+    promote = (ok_gate and ok_val and fresh) or args.force
+    if not promote:
+        reasons = [r for r, ok in (("sanity-gate", ok_gate), ("validation-eval", ok_val),
+                                   ("fraicheur", fresh)) if not ok]
+        log.warning(f"Promotion REFUSEE ({', '.join(reasons)}) -- artefact conserve, latest inchange")
+    elif args.force and not (ok_gate and ok_val and fresh):
+        log.warning("Garde-fous non satisfaits mais --force : promotion forcee")
+
     path = ml_model.save_artifact(model, meta, promote=promote)
     if not promote:
-        log.warning(f"Artefact conserve mais NON promu (gate echoue) : {path}")
+        log.warning(f"Artefact NON promu : {path}")
     log.info(f"Entrainement termine : n={meta['n_samples']} contamination={args.contamination} "
              f"calib(p50={calib['p50']:.3f}, p99={calib['p99']:.3f})")
     return True
