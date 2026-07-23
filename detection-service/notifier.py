@@ -10,7 +10,7 @@ log = logging.getLogger(__name__)
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 
 def send_slack_alert(endpoint_id, signal_type, severity, score, raw_value,
-                     correlation=None, deploy=None, explanation=None):
+                     correlation=None, deploy=None, explanation=None, ttd=None):
     """
     Envoie l'alerte FIRING sur Slack.
 
@@ -21,6 +21,8 @@ def send_slack_alert(endpoint_id, signal_type, severity, score, raw_value,
     `explanation` : dict retourne par explainer.generate_explanation() (ou None)
                     -- ajoute summary / cause probable / verifications. Peut etre
                     un template de fallback (champ `fallback=True`).
+    `ttd`         : dict retourne par ttd.estimate_ttd() (ou None) -- ajoute une
+                    alerte precoce advisory (extrapolation de tendance vers le SLO).
 
     Tous les enrichissements sont optionnels : si l'un manque, l'alerte de base
     part quand meme (l'alerting ne depend jamais du LLM ni de la correlation).
@@ -58,6 +60,21 @@ def send_slack_alert(endpoint_id, signal_type, severity, score, raw_value,
         imp = correlation.get("imputation_score")
         imp_txt = f" (score {imp:.2f})" if isinstance(imp, (int, float)) else ""
         lines.append(f"*Cause suspectee:* {scenario} / {fault}{imp_txt}")
+
+    # Alerte precoce TTD (advisory, extrapolation de tendance -- spec 8.4)
+    if ttd and not ttd.get("already_breaching"):
+        minutes = ttd.get("ttd_minutes")
+        low, high = ttd.get("ttd_low"), ttd.get("ttd_high")
+        if isinstance(minutes, (int, float)):
+            rng = ""
+            if isinstance(low, (int, float)) and isinstance(high, (int, float)):
+                rng = f" [{low:.0f}-{high:.0f}]"
+            slope = ttd.get("slope_ms_per_min")
+            slope_txt = f", +{slope:.1f}ms/min" if isinstance(slope, (int, float)) else ""
+            lines.append(
+                f"*Alerte precoce (tendance):* SLO p99 atteint dans ~{minutes:.0f} min{rng}"
+                f"{slope_txt} _(extrapolation, advisory)_"
+            )
 
     # Explication en langage naturel (LLM ou template de fallback)
     if explanation:

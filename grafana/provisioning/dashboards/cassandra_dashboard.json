@@ -1615,6 +1615,74 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "type": "stat",
+      "title": "Alerte precoce TTD (min) -- $endpoint",
+      "datasource": {
+        "type": "postgres",
+        "uid": "DS_TIMESCALEDB"
+      },
+      "description": "Temps estime avant franchissement du SLO p99 (extrapolation Theil-Sen, advisory -- spec 8.4). Vide si pas de tendance haussiere.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "m",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 10
+              },
+              {
+                "color": "yellow",
+                "value": 30
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 68
+      },
+      "id": 108,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "DS_TIMESCALEDB"
+          },
+          "rawQuery": true,
+          "format": "time_series",
+          "refId": "A",
+          "rawSql": "SELECT detected_at AS time, (contributing_features->'ttd'->>'ttd_minutes')::float AS value FROM anomalies WHERE endpoint_id='$endpoint' AND contributing_features->'ttd'->>'ttd_minutes' IS NOT NULL AND $__timeFilter(detected_at) ORDER BY detected_at"
+        }
+      ]
     }
   ],
   "refresh": "1m",

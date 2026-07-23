@@ -215,6 +215,11 @@ via le service `trainer`. Le `detector` recharge l'artefact quand `latest` chang
 **Anomaly store** : la table `anomalies` reçoit un enregistrement par cycle scoré
 (`score`, `layer`, `direction`, `contributing_features` top-3) — alimente la timeline Grafana.
 
+**Alerte précoce TTD** (`ttd.py`, spec §8.4, stretch) : quand la tendance p99 est
+haussière, extrapolation Theil-Sen vers le SLO → `ttd_minutes` avec intervalle
+(dispersion des pentes). **Advisory uniquement** (extrapolation de tendance, jamais
+garantie). Exposé dans `contributing_features.ttd`, en ligne Slack et sur un stat Grafana.
+
 ```bash
 # Entraîner un modèle manuellement (run-once)
 docker compose run --rm trainer python train_model.py

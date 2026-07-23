@@ -13,6 +13,7 @@ from baseline_utils import (
     ENDPOINT_SLOS, DEFAULT_SLOS,
 )
 from features import compute_features, vectorize, direction_of, WINDOW_SIZE, MIN_WINDOW
+from ttd import estimate_ttd
 import ml_model
 
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(message)s")
@@ -225,7 +226,7 @@ def set_ok(cur, endpoint_id, signal_type, now):
         WHERE endpoint_id = %s AND signal_type = %s
     """, (now, now, endpoint_id, signal_type))
 
-def process_signal(cur, endpoint_id, signal_type, anomaly, severity, score, raw_value, layer, now, expected_states=None, p99=None, err5xx=None):
+def process_signal(cur, endpoint_id, signal_type, anomaly, severity, score, raw_value, layer, now, expected_states=None, p99=None, err5xx=None, ttd=None):
     row = get_alert_state(cur, endpoint_id, signal_type)
     current_state = row[0] if row else "ok"
     pending_count = row[1] if row else 0
@@ -273,9 +274,10 @@ def process_signal(cur, endpoint_id, signal_type, anomaly, severity, score, raw_
                     explanation = generate_explanation(cur, endpoint_id, signal_type, now)
                 except Exception as e:
                     log.error(f"Explanation generation failed for {endpoint_id}/{signal_type}: {e}")
-                # --- notification (en dernier : enrichie cause + deploy + explication) ---
+                # --- notification (en dernier : enrichie cause + deploy + explication + TTD) ---
                 send_slack_alert(endpoint_id, signal_type, severity, score, raw_value,
-                                 correlation=correlation, deploy=deploy, explanation=explanation)
+                                 correlation=correlation, deploy=deploy, explanation=explanation,
+                                 ttd=ttd)
             else:
                 increment_pending(cur, endpoint_id, signal_type, severity, score, raw_value, layer, now)
                 new_state = "pending"
@@ -443,12 +445,23 @@ def run_detection(conn):
         else:
             top_features = []
 
+        # Alerte precoce TTD (spec 8.4, advisory) : si la tendance p99 est haussiere,
+        # on extrapole vers le SLO. Utile surtout avant le breach (layer 1/2 firent
+        # avant le SLO dur) : "a ce rythme, SLO atteint dans ~X min".
+        ttd = None
+        if anomaly and window and len(window) >= MIN_WINDOW:
+            try:
+                ttd = estimate_ttd([r.get("p99_ms") for r in window], slos["p99_ms"])
+            except Exception as e:
+                log.error(f"TTD estimation failed for {endpoint_id}: {e}")
+
         contributing = {
             "combined": round(combined, 4),
             "layers": {k: round(v, 4) for k, v in layer_scores.items()},
             "direction": direction,
             "ml_norm": round(ml_norm, 4),
             "top_features": top_features,
+            "ttd": ttd,
             "baseline": {
                 "metric": "p99_ms",
                 "observed": round(p99, 2),
@@ -466,7 +479,7 @@ def run_detection(conn):
 
         process_signal(cur, endpoint_id, "p99_ms", anomaly, severity if anomaly else None,
                        combined if anomaly else 0.0, p99, layer, now, _expected_states,
-                       p99=p99, err5xx=err5xx)
+                       p99=p99, err5xx=err5xx, ttd=ttd)
 
         # Persiste les features contributives sur l'alerte (best-effort).
         if anomaly:
