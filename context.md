@@ -329,6 +329,10 @@ Simule une **journée compressée en 2 heures** avec courbe sinusoïdale (5 à 5
 - PostgreSQL + extension TimescaleDB
 - Table `metrics(time, endpoint_id, metric_name, value)` en hypertable
 - Credentials : `cassandra / cassandra / cassandra`
+- **Compression + rétention** (`init.sql`) sur les hypertables append-only
+  `endpoint_features` et `anomalies` : compression des chunks > 7 j
+  (segmentby `endpoint_id`), purge des chunks > 90 j. Sans ces politiques les tables
+  (~7 200 lignes/jour chacune) croissaient sans limite. Ratio mesuré : **~6×**.
 
 ### Grafana (`:3000`)
 - Source de données : Prometheus

@@ -196,3 +196,42 @@ CREATE TABLE IF NOT EXISTS eval_runs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_eval_runs_time ON eval_runs (run_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- Compression + retention des hypertables time-series (perf + espace disque).
+-- Ces tables sont append-only (jamais d'UPDATE sur les vieilles lignes), donc la
+-- compression est sans risque : on compresse les chunks > 7 jours et on purge
+-- les chunks > 90 jours. Sans ces politiques, endpoint_features et anomalies
+-- (~7 200 lignes/jour chacune) croissent sans limite.
+--
+-- Les ALTER ... SET compress sont enveloppes dans un DO/EXCEPTION pour rester
+-- idempotents si init.sql est rejoue sur une base existante ; les policies
+-- utilisent if_not_exists => TRUE.
+-- ---------------------------------------------------------------------------
+DO $$
+BEGIN
+    ALTER TABLE endpoint_features SET (
+        timescaledb.compress,
+        timescaledb.compress_segmentby = 'endpoint_id',
+        timescaledb.compress_orderby = 'time DESC'
+    );
+EXCEPTION WHEN others THEN
+    RAISE NOTICE 'compression endpoint_features deja configuree';
+END $$;
+
+SELECT add_compression_policy('endpoint_features', INTERVAL '7 days', if_not_exists => TRUE);
+SELECT add_retention_policy('endpoint_features', INTERVAL '90 days', if_not_exists => TRUE);
+
+DO $$
+BEGIN
+    ALTER TABLE anomalies SET (
+        timescaledb.compress,
+        timescaledb.compress_segmentby = 'endpoint_id',
+        timescaledb.compress_orderby = 'detected_at DESC'
+    );
+EXCEPTION WHEN others THEN
+    RAISE NOTICE 'compression anomalies deja configuree';
+END $$;
+
+SELECT add_compression_policy('anomalies', INTERVAL '7 days', if_not_exists => TRUE);
+SELECT add_retention_policy('anomalies', INTERVAL '90 days', if_not_exists => TRUE);
