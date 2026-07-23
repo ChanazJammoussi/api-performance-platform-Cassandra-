@@ -6,3 +6,9 @@ scrape_configs:
   - job_name: otel-collector
     static_configs:
       - targets: ['otel-collector:8888']
+
+  # Metriques natives du detecteur (audit #15) : duree de cycle, alertes par
+  # etat, appels LLM, fraicheur des features.
+  - job_name: cassandra-detector
+    static_configs:
+      - targets: ['detector:9101']

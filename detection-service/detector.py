@@ -15,6 +15,7 @@ from baseline_utils import (
 from features import compute_features, vectorize, direction_of, WINDOW_SIZE, MIN_WINDOW
 from ttd import estimate_ttd
 import ml_model
+import prom_metrics as pm
 
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -272,7 +273,9 @@ def process_signal(cur, endpoint_id, signal_type, anomaly, severity, score, raw_
                 explanation = None
                 try:
                     explanation = generate_explanation(cur, endpoint_id, signal_type, now)
+                    pm.LLM_CALLS.labels(result="fallback" if explanation.get("fallback") else "llm").inc()
                 except Exception as e:
+                    pm.LLM_CALLS.labels(result="error").inc()
                     log.error(f"Explanation generation failed for {endpoint_id}/{signal_type}: {e}")
                 # --- notification (en dernier : enrichie cause + deploy + explication + TTD) ---
                 send_slack_alert(endpoint_id, signal_type, severity, score, raw_value,
@@ -373,6 +376,7 @@ def run_detection(conn):
     _expected_states = {}
     maybe_load_model()
     rows = get_latest_features(cur)
+    pm.ENDPOINTS_SCORED.set(len(rows))
     for row in rows:
         endpoint_id, p99, err5xx, ts = row
 
@@ -474,6 +478,7 @@ def run_detection(conn):
         try:
             write_anomaly(cur, endpoint_id, "p99_ms", ts, round(combined, 4),
                           layer or "combined", direction, contributing)
+            pm.ANOMALY_WRITES.inc()
         except Exception as e:
             log.error(f"Anomaly write failed for {endpoint_id}: {e}")
 
@@ -497,8 +502,25 @@ def run_detection(conn):
             process_signal(cur, endpoint_id, "error_rate_5xx", False, None, 0.0, err5xx, None, now, _expected_states, p99=p99, err5xx=err5xx)
 
     audit_state_consistency(cur, _expected_states)
+    _update_metrics_gauges(cur)
     conn.commit()
     cur.close()
+
+
+def _update_metrics_gauges(cur):
+    """Met a jour les gauges Prometheus (alertes par etat + fraicheur). Best-effort."""
+    try:
+        cur.execute("SELECT state, count(*) FROM alerts GROUP BY state")
+        counts = {state: n for state, n in cur.fetchall()}
+        for st in ("ok", "pending", "firing", "resolving"):
+            pm.ALERTS_STATE.labels(state=st).set(counts.get(st, 0))
+        cur.execute("SELECT EXTRACT(EPOCH FROM (now() - max(time))) FROM endpoint_features")
+        row = cur.fetchone()
+        if row and row[0] is not None:
+            pm.SCRAPE_FRESHNESS.set(float(row[0]))
+    except Exception as e:
+        log.error(f"metrics gauges update failed: {e}")
+
 
 def run():
     conn = psycopg2.connect(DB_URL)
@@ -506,11 +528,15 @@ def run():
     ensure_schema(cur)
     conn.commit()
     cur.close()
+    pm.start_metrics_server()
     log.info("Detector started")
     while True:
         try:
+            t0 = time.monotonic()
             run_detection(conn)
+            pm.CYCLE_SECONDS.observe(time.monotonic() - t0)
         except Exception as e:
+            pm.CYCLE_ERRORS.inc()
             log.error(f"Detection cycle failed: {e}")
             conn = psycopg2.connect(DB_URL)
         time.sleep(60)

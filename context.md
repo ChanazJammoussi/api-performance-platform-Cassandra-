@@ -280,7 +280,18 @@ Datasource TimescaleDB (provisionnée). Deux dashboards dans
   `evaluate_layered.py --persist`.
 - **Cassandra - Self-observability** (`cassandra-selfobs-v1`, spec §11) : fraîcheur scraper /
   détecteur (lag alerting visuel par seuils), cadence des cycles (~60s), taux de fallback LLM,
-  qualité d'alerte (transitions FIRING 24h, durée FIRING médiane, historique par couche).
+  qualité d'alerte (transitions FIRING 24h, durée FIRING médiane, historique par couche),
+  **santé du modèle ML** (drift KS), et **runtime détecteur** via les métriques Prometheus
+  natives.
+
+### Métriques Prometheus natives (`prom_metrics.py`, audit #15)
+Le détecteur expose `/metrics` sur le port **9101** (scrapé par Prometheus, job
+`cassandra-detector`) : `cassandra_detector_cycle_seconds` (histogramme de durée de cycle),
+`cassandra_detector_endpoints_scored`, `cassandra_detector_alerts{state}`,
+`cassandra_detector_anomaly_writes_total`, `cassandra_llm_calls_total{result}`,
+`cassandra_scrape_freshness_seconds`, `cassandra_detector_cycle_errors_total`. Import
+défensif (no-op si la lib manque → le détecteur ne crashe jamais). Datasource Prometheus
+provisionnée dans Grafana ; alerting Prometheus natif désormais possible.
 
 ## Tests (`detection-service/tests/`)
 

@@ -112,8 +112,11 @@ services:
       - DATABASE_URL=postgresql://cassandra:cassandra@timescaledb:5432/cassandra
       - GROUND_TRUTH_DIR=/data/results
       - MODEL_DIR=/app/models
+      - METRICS_PORT=9101
       - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+    ports:
+      - "9101:9101"          # /metrics Prometheus du detecteur
     volumes:
       - ./scenario-runner/results:/data/results:ro
       - models_data:/app/models
