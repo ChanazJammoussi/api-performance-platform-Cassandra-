@@ -17,6 +17,9 @@ SERVICES = {
 # le conteneur deploy-api depuis un autre reseau.
 DEPLOY_API_URL = os.environ.get("DEPLOY_API_URL", "http://localhost:8090")
 
+# Cle CI optionnelle : envoyee en X-API-Key si l'API deploy exige une auth (spec 12).
+DEPLOY_API_KEY = os.environ.get("DEPLOY_API_KEY", "").strip()
+
 # Repertoire des ground truth JSON, resolu par rapport a l'emplacement de ce
 # fichier (et non au CWD) pour que le correlator les retrouve toujours.
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
@@ -50,8 +53,9 @@ async def register_deploy(client: httpx.AsyncClient, deploy: dict) -> dict | Non
     }
     if "metadata" in deploy:
         payload["metadata"] = deploy["metadata"]
+    headers = {"X-API-Key": DEPLOY_API_KEY} if DEPLOY_API_KEY else None
     try:
-        resp = await client.post(f"{DEPLOY_API_URL}/deploys", json=payload, timeout=10)
+        resp = await client.post(f"{DEPLOY_API_URL}/deploys", json=payload, headers=headers, timeout=10)
         resp.raise_for_status()
         data = resp.json()
         print(f"  Deploy enregistre: {data['service']} {data['version']} "

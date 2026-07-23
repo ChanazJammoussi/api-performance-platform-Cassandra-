@@ -158,6 +158,7 @@ services:
       - timescaledb
     environment:
       - DATABASE_URL=postgresql://cassandra:cassandra@timescaledb:5432/cassandra
+      - DEPLOY_API_KEY=${DEPLOY_API_KEY:-}   # cle CI ; si vide -> mode dev non authentifie
 
   # --- Trainer ML : refit nightly de l'Isolation Forest (spec 8.3) -----------
   # Ecrit l'artefact dans le volume partage models_data ; le detector recharge

@@ -20,13 +20,33 @@ from datetime import datetime, timezone
 
 import psycopg2
 import psycopg2.extras
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Security
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
 DB_URL = os.environ.get("DATABASE_URL", "postgresql://cassandra:cassandra@localhost:5434/cassandra")
+
+# Cle CI dediee pour l'endpoint de deploiements (spec 12). Si definie, POST /deploys
+# exige l'en-tete X-API-Key. Si absente : mode dev (non authentifie) avec avertissement.
+DEPLOY_API_KEY = os.environ.get("DEPLOY_API_KEY", "").strip()
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+if DEPLOY_API_KEY:
+    log.info("Auth par cle API activee sur POST /deploys (X-API-Key)")
+else:
+    log.warning("DEPLOY_API_KEY non defini -- POST /deploys est NON authentifie (mode dev)")
+
+
+def require_api_key(key: str | None = Security(_api_key_header)):
+    """Exige X-API-Key si une cle est configuree ; no-op en mode dev."""
+    if not DEPLOY_API_KEY:
+        return
+    if key != DEPLOY_API_KEY:
+        raise HTTPException(status_code=401, detail="cle API invalide ou absente (X-API-Key)")
+
 
 app = FastAPI(title="Cassandra Deploy Events API", version="1.0.0")
 
@@ -57,7 +77,8 @@ def health():
     return {"status": "ok"}
 
 
-@app.post("/deploys", response_model=DeployOut, status_code=201)
+@app.post("/deploys", response_model=DeployOut, status_code=201,
+          dependencies=[Security(require_api_key)])
 def register_deploy(deploy: DeployIn):
     deployed_at = deploy.deployed_at or datetime.now(timezone.utc)
     if deployed_at.tzinfo is None:

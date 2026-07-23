@@ -72,7 +72,10 @@ info "Prechauffe terminee."
 
 # --- 2. Enregistrement du deploiement --------------------------------------
 say "2. Enregistrement d'un deploiement (control plane)"
-DEPLOY_RESP=$(curl -s -X POST "$DEPLOY_API/deploys" -H 'Content-Type: application/json' \
+# Envoie la cle CI si l'API deploy exige une auth (spec 12).
+AUTH_HEADER=()
+if [ -n "${DEPLOY_API_KEY:-}" ]; then AUTH_HEADER=(-H "X-API-Key: ${DEPLOY_API_KEY}"); fi
+DEPLOY_RESP=$(curl -s -X POST "$DEPLOY_API/deploys" -H 'Content-Type: application/json' "${AUTH_HEADER[@]}" \
   -d "{\"service\":\"$SERVICE\",\"version\":\"$VERSION\",\"metadata\":{\"commit\":\"demo\",\"author\":\"chanaz\"}}")
 info "Deploiement enregistre : $SERVICE $VERSION"
 info "$DEPLOY_RESP"

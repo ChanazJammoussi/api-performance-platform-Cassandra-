@@ -9,7 +9,7 @@ durcissement recommandé · 🔒 dev-only (à renforcer avant toute exposition).
 | Redaction PII collector | ⚠️ | Denylist en place ; le spec préconise une allowlist (voir ci-dessous). |
 | Fault API hors surface plateforme | ✅ | Le gateway (`:8000`) ne proxifie pas `/faults` : l'API fault n'est pas sur l'API publique. |
 | Fault API non tracée | ⚠️ | Les routes `/faults/*` apparaissent dans les traces/métriques (§4.3 : ne doivent pas être tracées). |
-| Auth API scoped keys | 🔒 | `deploy_api.py` (`:8090`) non authentifié (dev). |
+| Auth API scoped keys | ✅ | `POST /deploys` exige `X-API-Key` si `DEPLOY_API_KEY` est défini (clé CI, spec §12). |
 | Credentials par défaut | 🔒 | DB `cassandra/cassandra`, Grafana `admin/admin` (dev). |
 
 ## 1. Secrets ✅
@@ -47,10 +47,14 @@ spanmetrics et le label `service_name` (0 série produite). Validé empiriquemen
   un `filter` processor supprimant les spans dont `http.route` commence par `/faults/`
   (à valider comme au point 2 pour ne pas casser le pipeline).
 
-## 4. Authentification API 🔒
+## 4. Authentification API ✅ (audit #18)
 Le spec §12 demande des **clés API scoped** (clé CI dédiée pour l'endpoint de déploiements).
-`deploy_api.py` est actuellement non authentifié (dev, port interne). **Recommandation** : ajouter
-une auth par clé API (header) avant toute exposition non-locale ; clé dédiée pour `POST /deploys`.
+Implémenté : `POST /deploys` est protégé par un en-tête **`X-API-Key`** validé contre
+`DEPLOY_API_KEY`. Si la variable est définie, toute requête sans clé (ou avec mauvaise clé)
+reçoit **401** ; si elle est absente, mode **dev non authentifié** avec avertissement au
+démarrage. Le scenario-runner et `scripts/demo.sh` envoient automatiquement la clé si
+`DEPLOY_API_KEY` est présente. Les endpoints de lecture (`GET /deploys`, `/health`) restent
+ouverts. **Reste** : étendre l'auth aux futures API publiques (anomalies/alertes/baselines).
 
 ## 5. Credentials par défaut 🔒
 DB (`cassandra/cassandra`) et Grafana (`admin/admin`) utilisent des identifiants par défaut de
