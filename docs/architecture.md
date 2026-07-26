@@ -220,9 +220,6 @@ flowchart TD
     detector -->|insert/cycle| an[("anomalies<br/>score, layer, direction, top-3, TTD")]
     deployapi -->|insert| de[("deploy_events<br/>service, version, deployed_at")]
     evallayered -->|insert| er[("eval_runs<br/>DR static/layered, FP/h, magnitude")]
-
-    classDef unused fill:#eee,stroke:#999,color:#999;
-    metrics[("metrics — hypertable non alimentée (dette)")]:::unused
 ```
 
 | Table | Producteur | Consommateurs | Note |
@@ -234,7 +231,6 @@ flowchart TD
 | `anomalies` | detector | Grafana | 1 ligne par cycle scoré (anomaly store §6.3) |
 | `deploy_events` | deploy-api | correlator, Grafana | registre control-plane |
 | `eval_runs` | evaluate_layered | Grafana (dashboard éval) | résultats de campagne |
-| `metrics` | — | — | **non alimentée** (à supprimer, audit #4) |
 
 ---
 

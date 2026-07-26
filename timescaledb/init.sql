@@ -1,18 +1,6 @@
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 
 -- ---------------------------------------------------------------------------
--- metrics : hypertable brute (reservee aux exports directs OTel eventuels)
--- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS metrics (
-    time        TIMESTAMPTZ NOT NULL,
-    endpoint_id TEXT NOT NULL,
-    metric_name TEXT NOT NULL,
-    value       DOUBLE PRECISION NOT NULL
-);
-
-SELECT create_hypertable('metrics', 'time', if_not_exists => TRUE);
-
--- ---------------------------------------------------------------------------
 -- endpoint_features : features RED alimentees par scraper.py (poll Prometheus)
 -- Hypertable time-series, une ligne par (endpoint, cycle de 60s).
 -- ---------------------------------------------------------------------------
@@ -100,8 +88,7 @@ CREATE TABLE IF NOT EXISTS alerts_history (
     fired_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Trigger : a chaque passage OK/pending/resolving -> firing, on ecrit une
--- ligne d'historique. Idempotent au niveau du couple fonction + trigger.
+-- Trigger : chaque passage -> firing ecrit une ligne dans alerts_history.
 CREATE OR REPLACE FUNCTION log_firing_transition()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -218,15 +205,8 @@ CREATE TABLE IF NOT EXISTS model_health (
 CREATE INDEX IF NOT EXISTS idx_model_health_time ON model_health (checked_at DESC);
 
 -- ---------------------------------------------------------------------------
--- Compression + retention des hypertables time-series (perf + espace disque).
--- Ces tables sont append-only (jamais d'UPDATE sur les vieilles lignes), donc la
--- compression est sans risque : on compresse les chunks > 7 jours et on purge
--- les chunks > 90 jours. Sans ces politiques, endpoint_features et anomalies
--- (~7 200 lignes/jour chacune) croissent sans limite.
---
--- Les ALTER ... SET compress sont enveloppes dans un DO/EXCEPTION pour rester
--- idempotents si init.sql est rejoue sur une base existante ; les policies
--- utilisent if_not_exists => TRUE.
+-- Compression (chunks > 7j) + retention (purge > 90j) des hypertables.
+-- DO/EXCEPTION pour idempotence si init.sql est rejoue sur une base existante.
 -- ---------------------------------------------------------------------------
 DO $$
 BEGIN

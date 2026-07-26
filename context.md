@@ -354,7 +354,6 @@ Simule une **journée compressée en 2 heures** avec courbe sinusoïdale (5 à 5
 
 ### TimescaleDB (`:5432`)
 - PostgreSQL + extension TimescaleDB
-- Table `metrics(time, endpoint_id, metric_name, value)` en hypertable
 - Credentials : `cassandra / cassandra / cassandra`
 - **Compression + rétention** (`init.sql`) sur les hypertables append-only
   `endpoint_features` et `anomalies` : compression des chunks > 7 j
@@ -372,47 +371,56 @@ Simule une **journée compressée en 2 heures** avec courbe sinusoïdale (5 à 5
 ```
 cassandra/
 ├── docker-compose.yml
-├── context.md
+├── README.md
+├── CLAUDE.md                      # conventions + contrat d'implémentation
+├── .env.example                   # variables d'environnement (secrets)
+├── context.md                     # documentation technique détaillée (ce fichier)
+├── docs/
+│   ├── design-spec.md             # spec de conception (référence contraignante)
+│   ├── architecture.md            # diagrammes Mermaid (flux, couches, ML, données)
+│   ├── results.md                 # synthèse résultats + messages clés (soutenance)
+│   └── security.md                # audit sécurité (§12)
+├── scripts/
+│   └── demo.sh                    # démo bout-en-bout scriptée (trafic → détection)
 ├── k6/
-│   └── load.js                    # script de charge k6
+│   └── load.js                    # script de charge k6 (journée compressée en 2 h)
 ├── otel-collector/
 │   └── config.yaml                # pipeline OTel (traces → spanmetrics → prometheus)
 ├── prometheus/
-│   └── prometheus.yml             # scrape config
+│   └── prometheus.yml             # scrape config (+ job cassandra-detector)
 ├── timescaledb/
-│   └── init.sql                   # hypertable metrics
+│   └── init.sql                   # schéma + compression + rétention
+├── grafana/
+│   └── provisioning/
+│       ├── datasources/           # Prometheus + TimescaleDB
+│       └── dashboards/            # API Performance, Evaluation, Self-observabilité
+├── .github/
+│   └── workflows/ci.yml           # CI GitHub Actions (pytest à chaque push/PR)
 ├── services/
-│   ├── gateway/
-│   │   ├── main.py                # proxy FastAPI
-│   │   ├── Dockerfile
-│   │   └── requirements.txt
-│   ├── orders/
-│   │   ├── main.py                # service + métriques OTel + fault control API
-│   │   ├── fault.py               # FaultState + apply_* helpers
-│   │   ├── Dockerfile
-│   │   └── requirements.txt
-│   └── payments/
-│       ├── main.py                # service + métriques OTel + fault control API
-│       ├── fault.py               # même interface que orders
-│       ├── Dockerfile
-│       └── requirements.txt
-└── scenario-runner/
-    ├── runner.py                  # CLI d'injection de scénarios
-    ├── ground_truth_test.json     # exemple de ground truth
-    └── scenarios/
-        ├── quiet_baseline.yaml
-        ├── bad_deploy.yaml
-        ├── latency_step_small.yaml
-        ├── latency_step_large.yaml
-        ├── latency_creep_orders.yaml
-        ├── latency_creep_slow.yaml
-        ├── error_burst_low.yaml
-        ├── error_burst_high.yaml
-        ├── error_burst_payments.yaml
-        ├── pool_shrink_orders.yaml
-        ├── pool_shrink_heavy.yaml
-        ├── downstream_slow_payments.yaml
-        └── combined_latency_errors.yaml
+│   ├── gateway/                   # proxy FastAPI (port 8000)
+│   ├── orders/                    # service + métriques OTel + fault injection (8001)
+│   └── payments/                  # service + métriques OTel + fault injection (8002)
+├── scenario-runner/
+│   ├── runner.py                  # CLI d'injection de scénarios YAML
+│   ├── scenarios/                 # 13 scénarios (bad_deploy, latency_*, error_*, ...)
+│   └── results/                   # ground-truth JSON + campagnes d'évaluation
+└── detection-service/
+    ├── scraper.py                 # poll Prometheus → endpoint_features
+    ├── detector.py                # boucle 60 s : scoring, state machine, orchestration
+    ├── baseline_job.py            # quantiles saisonniers → endpoint_baseline
+    ├── features.py                # features endpoint-relatives (math pure)
+    ├── ml_model.py                # Isolation Forest, calibration, attribution, artefact
+    ├── train_model.py             # entraînement + sanity-gate + promotion
+    ├── model_monitor.py           # surveillance drift ML (KS live vs référence)
+    ├── deploy_api.py              # API registre de déploiements (FastAPI, port 8090)
+    ├── correlator.py              # corrélation injection + déploiement causal
+    ├── explainer.py               # contexte + prompt LLM Gemini + fallback template
+    ├── notifier.py                # message Slack enrichi
+    ├── prom_metrics.py            # métriques Prometheus natives (/metrics port 9101)
+    ├── ttd.py                     # alerte précoce TTD (extrapolation Theil-Sen)
+    ├── evaluate_layered.py        # évaluation offline layered vs static
+    ├── compare_supervised.py      # comparaison supervisé vs non-supervisé (stretch)
+    └── tests/                     # suite pytest (68 tests, logique pure)
 ```
 
 ---
