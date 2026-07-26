@@ -260,6 +260,12 @@ CREATE TRIGGER trg_no_cycle
     FOR EACH ROW
     EXECUTE FUNCTION check_endpoint_relationship_no_cycle();
 
+-- Index sur child_endpoint_id : acces efficace aux parents d'un endpoint
+-- (requis par analyze_service_graph query 2 : WHERE child_endpoint_id = %s)
+-- et par la CTE recursive qui joint sur parent_endpoint_id depuis les descendants.
+CREATE INDEX IF NOT EXISTS idx_endpoint_relationships_child
+    ON endpoint_relationships(child_endpoint_id);
+
 -- Topologie d'appel de la stack de demonstration (idempotent).
 INSERT INTO endpoint_relationships
     (parent_endpoint_id, child_endpoint_id, parent_service, child_service, call_type, metadata)

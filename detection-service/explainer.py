@@ -197,11 +197,12 @@ Regles pour service_attribution (si present dans le contexte) :
      cette anomalie en amont."
    - call_type "direct" = appel proxy ; "cascade" = appel interne en cascade
    - Calibrer le vocabulaire selon confidence (derive de confidence_score, distinct de anomaly_score) :
-       "high"   -> "vraisemblablement causee par" (direct + signal fort, confidence_score >= 0.65)
-       "medium" -> "semble liee a" ou "probablement" (evidence moderee, confidence_score >= 0.35)
-       "low"    -> "une correlation possible existe avec" (signal faible, < 0.35)
+       "high"   -> "vraisemblablement causee par" (direct depth=1 + signal fort, confidence_score >= 0.70)
+       "medium" -> "semble liee a" ou "probablement" (evidence moderee : cascade ou profondeur > 1)
+       "low"    -> "une correlation possible existe avec" (signal faible ou cause distante, < 0.35)
    - confidence_score mesure la plausibilite du LIEN CAUSAL, pas l'intensite de l'anomalie.
-     Exemple : anomaly_score=0.95 cascade -> confidence_score=0.62 -> medium (pas high).
+     Exemple : anomaly_score=0.95 cascade -> confidence_score=0.665 -> medium (jamais high).
+   - Si depth > 1, mentionner le chemin (champ "path") : "via <intermediaire> -> <candidat>".
    - Si confidence est absent, utiliser le vocabulaire "medium" par defaut.
 
 2. Si root_cause_candidates est vide mais children/parents sont presents :
@@ -211,8 +212,11 @@ Regles pour service_attribution (si present dans le contexte) :
 3. Si service_attribution est absent ou null :
    - Ne pas mentionner les dependances de service.
 
-4. Limite 1-hop : le contexte ne contient qu'un saut de dependance.
+4. Traversee bornee du graphe (jusqu'a MAX_GRAPH_DEPTH sauts).
+   Les candidats root_cause_candidates peuvent inclure des noeuds a depth > 1 avec un chemin
+   ("path") et un confidence_score reduit mecaniquement par la profondeur (depth_weight = 1/depth).
    Ne pas speculer sur des causes au-dela de ce qui est dans root_cause_candidates.
+   Une profondeur elevee (depth >= 2) reduit la confiance causale : formuler avec prudence.
 """
 
 

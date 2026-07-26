@@ -504,3 +504,34 @@ de topologie, Cassandra ne peut pas distinguer une cause locale d'une propagatio
 - Pas de FK vers `endpoint_features` (hypertable TimescaleDB incompatible avec FK sur
   table compressée).
 
+### P2 — Traversée bornée du graphe pour la priorisation RCA
+
+**Motivation.** La traversée 1-hop ne permet pas à `POST /api/payments` de voir
+`GET /orders/{order_id}` comme cause racine potentielle quand la dégradation se propage
+sur deux sauts (`gateway → payments → orders`). L'opérateur devait consulter l'alerte
+intermédiaire pour reconstituer la chaîne.
+
+**Implémentation.**
+
+- Requête `WITH RECURSIVE` bornée par `MAX_GRAPH_DEPTH` (défaut 3, configurable via env).
+- Double protection anti-cycles : `UNION` (déduplication SQL) + `NOT (child = ANY(path))`
+  (garde runtime en cas de graphe invalide malgré le trigger `trg_no_cycle`).
+- Index `idx_endpoint_relationships_child` sur `child_endpoint_id` : accès O(log n)
+  aux parents (requis par la query 2 de la fonction).
+- Champs `depth` et `path` ajoutés aux entrées de `root_cause_candidates` (extension
+  rétrocompatible — les champs existants sont conservés).
+- Formule confidence_score étendue :
+  `min(0.95, anomaly_score × call_type_weight × (1/depth))`
+  avec `direct=1.00`, `cascade=0.70`. Seuil `high ≥ 0.70` garantit que la cascade
+  (max 0.665) reste toujours `medium` ou `low`.
+- Tri des candidats par `confidence_score` DESC (favorise les causes proches et directes).
+- `children` contient uniquement les voisins directs (depth=1) pour la lisibilité.
+
+**Invariants conservés.**
+
+- Layer 0/1/2 strictement non modifiés.
+- Best-effort : toute exception dans `analyze_service_graph` est catchée dans `detector.py`.
+- Rétrocompatibilité JSON : aucun champ supprimé, `depth` et `path` ajoutés seulement.
+- Ceci reste une **corrélation topologique**, pas un remplacement du distributed tracing.
+  `confidence_score` ne prouve pas la causalité : il priorise l'investigation.
+

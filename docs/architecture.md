@@ -262,7 +262,7 @@ pas un arbre. La table `endpoint_relationships` (PRIMARY KEY composite) représe
 ce cas correctement — un simple `parent_endpoint_id TEXT` sur `endpoint_features`
 ne suffirait pas.
 
-### Scénario de propagation (exemple `bad_deploy` sur orders)
+### Scénario de propagation — traversée multi-hop (exemple `bad_deploy` sur orders)
 
 ```
 POST /api/payments ──direct──► POST /payments ──cascade──► GET /orders/{order_id}
@@ -270,18 +270,35 @@ POST /api/payments ──direct──► POST /payments ──cascade──► G
   [FIRING 0.78]                [FIRING 0.82]                 [FIRING 0.91]
 ```
 
-Quand `POST /api/payments` passe en FIRING (cycle N+1) :
+Quand `POST /api/payments` passe en FIRING (cycle N+1) avec `MAX_GRAPH_DEPTH=3` :
 
-1. `analyze_service_graph` charge le voisinage direct (1 saut).
-2. `POST /payments` est enfant direct, score=0.82, direction=`degradation`.
-3. Il entre dans `root_cause_candidates` avec `reason="degradation de dependance direct"`.
-4. `service_attribution` est injecté dans `contributing_features` (JSONB, cycle N).
-5. L'explainer (LLM ou fallback) lit ce contexte au moment FIRING pour formuler la cause.
+1. `analyze_service_graph` lance une CTE récursive jusqu'à 3 sauts.
+2. `POST /payments` (depth=1) et `GET /orders/{order_id}` (depth=2) sont découverts.
+3. Les deux sont en dégradation → ils entrent dans `root_cause_candidates`.
+4. Tri par `confidence_score` DESC : `POST /payments` (direct, depth=1, cs=0.74) avant
+   `GET /orders/{order_id}` (cascade, depth=2, cs≈0.32).
+5. `service_attribution` est injecté dans `contributing_features` (JSONB).
+6. L'explainer (LLM ou fallback) lit ce contexte au moment FIRING.
 
-> **Limite 1-hop :** `GET /orders/{order_id}` n'est pas visible depuis `POST /api/payments`
-> (2 sauts). La chaîne complète est lisible en consultant l'alerte `POST /payments`.
+### Formule `confidence_score` (P2)
 
-### Schéma `service_attribution` (extrait de `contributing_features`)
+```
+confidence_score = min(0.95, anomaly_score × call_type_weight × depth_weight)
+  call_type_weight : direct=1.00, cascade=0.70
+  depth_weight     : 1 / depth
+```
+
+| Scénario | Formule | confidence_score | Niveau |
+|---|---|---|---|
+| direct depth=1 score=0.90 | 0.90×1.0×1.0 | 0.90 | high |
+| cascade depth=1 score=0.90 | 0.90×0.7×1.0 | 0.63 | medium |
+| direct depth=2 score=0.90 | 0.90×1.0×0.5 | 0.45 | medium |
+| cascade depth=2 score=0.90 | 0.90×0.7×0.5 | 0.32 | low |
+
+**Seuil high ≥ 0.70** : la cascade (max `round(0.95×0.70, 2)` = 0.66) reste toujours `medium` ou `low`.
+Un lien indirect ne peut pas avoir la même certitude causale qu'un appel direct.
+
+### Schéma `service_attribution` — format P2 (extrait de `contributing_features`)
 
 ```json
 {
@@ -289,17 +306,24 @@ Quand `POST /api/payments` passe en FIRING (cycle N+1) :
   "service":     "gateway",
   "children": [
     { "endpoint_id": "POST /payments", "service": "payments",
-      "call_type": "direct", "status": "degraded",
-      "anomaly_score": 0.82, "direction": "degradation" }
+      "call_type": "direct", "depth": 1,
+      "path": ["POST /api/payments", "POST /payments"],
+      "status": "degraded", "anomaly_score": 0.82, "direction": "degradation" }
   ],
   "parents": [],
   "root_cause_candidates": [
     { "endpoint_id": "POST /payments", "service": "payments",
-      "call_type": "direct", "status": "degraded",
-      "anomaly_score": 0.82, "direction": "degradation",
-      "confidence_score": 0.74,
-      "confidence": "high",
-      "reason": "co-degradation correlee sur dependance direct -- causalite suspectee, non demontree" }
+      "call_type": "direct", "depth": 1,
+      "path": ["POST /api/payments", "POST /payments"],
+      "status": "degraded", "anomaly_score": 0.82, "direction": "degradation",
+      "confidence_score": 0.82, "confidence": "high",
+      "reason": "co-degradation correlee sur dependance direct -- causalite suspectee, non demontree" },
+    { "endpoint_id": "GET /orders/{order_id}", "service": "orders",
+      "call_type": "cascade", "depth": 2,
+      "path": ["POST /api/payments", "POST /payments", "GET /orders/{order_id}"],
+      "status": "degraded", "anomaly_score": 0.91, "direction": "degradation",
+      "confidence_score": 0.32, "confidence": "low",
+      "reason": "signal de degradation faible sur dependance cascade, profondeur 2 -- correlation possible, non demontree" }
   ]
 }
 ```
@@ -310,6 +334,17 @@ Quand `POST /api/payments` passe en FIRING (cycle N+1) :
 - **Aucune auto-référence** : `CHECK (parent_endpoint_id <> child_endpoint_id)`.
 - **Pas de FK** vers `endpoint_features` : hypertable TimescaleDB incompatible avec FK
   sur table compressée.
+- **Index `child_endpoint_id`** : `idx_endpoint_relationships_child` — lookup parents en O(log n).
+
+### Protection anti-cycles — double barrière (P2)
+
+```
+1. DB-level    : trigger trg_no_cycle (CTE UNION déduplique lors de l'INSERT)
+2. Runtime SQL : NOT (child_endpoint_id = ANY(path)) dans la CTE WITH RECURSIVE
+3. Profondeur  : WHERE depth < MAX_GRAPH_DEPTH (défaut 3, via variable d'env)
+```
+
+Cette triple protection garantit la terminaison même si un graphe invalide existait en DB.
 
 ### Invariant de détection
 
@@ -350,37 +385,67 @@ GET /orders        GET /orders/{order_id}     POST /payments
                         (POST /payments valide la commande)
 ```
 
-**3. Limitation actuelle : traversée 1-hop uniquement**
+**3. Traversée multi-hop bornée (P2)**
 
-`analyze_service_graph` ne charge que le voisinage direct (1 saut) :
+`analyze_service_graph` utilise une CTE `WITH RECURSIVE` limitée à `MAX_GRAPH_DEPTH` sauts :
 
 ```sql
-WHERE parent_endpoint_id = %s OR child_endpoint_id = %s
+WITH RECURSIVE descendants(...) AS (
+    -- Niveau 1 : enfants directs
+    SELECT child_endpoint_id, ... FROM endpoint_relationships WHERE parent_endpoint_id = %s
+    UNION
+    -- Niveaux suivants : borné + protection cycle runtime
+    SELECT er.child_endpoint_id, ... FROM endpoint_relationships er
+    JOIN descendants d ON er.parent_endpoint_id = d.endpoint_id
+    WHERE d.depth < MAX_GRAPH_DEPTH AND NOT (er.child_endpoint_id = ANY(d.path))
+)
 ```
 
-La cause profonde d'une chaîne `A → B → C` n'est visible depuis A que si B est
-en dégradation. La chaîne complète est lisible en consultant l'alerte de B.
+`children` = descendants à depth=1 uniquement (vue directe).
+`root_cause_candidates` = tous descendants dégradés (depth 1..MAX_GRAPH_DEPTH),
+triés par `confidence_score` DESC pour **favoriser les causes proches et directes**.
 
-**Note : `anomaly_score` ≠ `confidence_score`**
+**Sémantique `call_type` multi-hop** : `call_type` représente le type de la **dernière arête
+parcourue** vers ce nœud, pas du chemin complet. Pour `A --direct--> B --cascade--> C`,
+C a `call_type = "cascade"`. Pour depth=1, `call_type` est l'arête directe (comportement
+intuitif).
+
+**Déduplication DAG diamant** : un même endpoint peut être atteignable via plusieurs chemins
+(ex : `A→B→D` et `A→C→D`). `analyze_service_graph` déduplique par `endpoint_id` en
+conservant l'entrée avec le meilleur `confidence_score` (chemin direct/peu profond préféré
+mécaniquement par la formule).
+
+**4. `anomaly_score` ≠ `confidence_score`**
 
 `anomaly_score` mesure l'intensité de l'anomalie du voisin (est-il anomal ?).
-`confidence_score` mesure la plausibilité du **lien causal** (est-il LA cause ?), calculé comme
-`min(0.95, anomaly_score × call_type_weight)` avec `direct=0.90`, `cascade=0.65`. Plafond 0.95 :
-la corrélation observée en 1 saut n'établit jamais une causalité certaine.
+`confidence_score` mesure la plausibilité du **lien causal** (est-il LA cause ?).
+La formule pénalise les relations indirectes (cascade) et les causes distantes (depth > 1).
+Le plafond 0.95 garantit qu'une corrélation n'affirme jamais une causalité certaine.
 
-Exemple : `anomaly_score=0.95` sur cascade → `confidence_score=0.62` → niveau `medium` (pas `high`).
+**5. Pourquoi ce n'est pas un remplacement du distributed tracing**
 
-**4. Pourquoi cette limitation est acceptable**
+Cette RCA est une **corrélation topologique**, pas un remplacement du tracing distribué :
 
-- Chaque alerte conserve son propre contexte de voisinage — aucune alerte ne peut
-  masquer en une autre.
-- Une traversée multi-hop risquerait des fausses attributions : un nœud dégradé
-  à 3 sauts peut être totalement indépendant.
-- En pratique, le cas critique est la propagation directe (1 saut) : `gateway → service`.
-  La chaîne `gateway → payments → orders` génère 3 alertes, chacune avec son candidat
-  root-cause direct. L'opérateur peut reconstituer la chaîne en les consultant.
-- L'extension multi-hop reste possible (P2) sans modifier l'architecture existante :
-  il suffit d'étendre la requête SQL avec un CTE récursif limité en profondeur.
+| | `analyze_service_graph` | OpenTelemetry / Jaeger |
+|---|---|---|
+| Source | Graphe statique `endpoint_relationships` | Spans instrumentés en temps réel |
+| Granularité | Endpoint (agrégat 1 min) | Trace individuelle (µs) |
+| Causalité | Corrélation temporelle + topologie | Propagation de contexte W3C Trace-Context |
+| Latence | ~2 cycles (~2 min) | Quasi temps-réel |
+| But | Prioriser l'investigation | Reproduire le chemin exact d'une requête |
+
+Cassandra complète — et ne remplace pas — le tracing distribué. Son avantage est de
+fonctionner **sans instrumentation par requête** : il corrèle les anomalies au niveau
+des métriques RED agrégées, ce qui couvre les services non-instrumentés OTel.
+
+**6. Limites restantes après P3**
+
+- Parents : toujours 1-hop (les parents des parents ne sont pas listés).
+- `MAX_GRAPH_DEPTH=3` : chaînes > 3 sauts non résolues (acceptable, §5.6 future work).
+- Pas de corrélation temporelle fine inter-alertes (chaque alerte a son propre contexte).
+- `confidence_score` `"high"` impossible pour depth ≥ 2 (voulu : la profondeur atténue la certitude).
+- `call_type` = dernière arête, pas résumé du chemin complet. Un chemin `direct→cascade` produit
+  `call_type="cascade"` pour le nœud terminal (comportement documenté, connu).
 
 ---
 

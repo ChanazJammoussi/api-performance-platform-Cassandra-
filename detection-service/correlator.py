@@ -25,6 +25,10 @@ log = logging.getLogger(__name__)
 # Fenetre causale : on cherche des injections dans [onset - CAUSAL_WINDOW, onset + CAUSAL_WINDOW]
 CAUSAL_WINDOW_MINUTES = 30
 
+# Profondeur maximale de traversee du DAG endpoint_relationships.
+# Configurable via MAX_GRAPH_DEPTH pour ajuster le rayon RCA sans modifier le code.
+MAX_GRAPH_DEPTH = int(os.environ.get("MAX_GRAPH_DEPTH", "3"))
+
 # Repertoire des ground truth JSON, resolu par rapport a l'emplacement de ce
 # fichier (et non au CWD). Surcharges possible via GROUND_TRUTH_DIR.
 RESULTS_DIR = os.environ.get(
@@ -345,30 +349,38 @@ def _status_from_direction(direction: str | None) -> str:
     return "unknown"
 
 
-# Poids de causalite par type de relation (direct = lien synchrone, cascade = indirect)
-_CALL_TYPE_WEIGHT: dict[str, float] = {"direct": 0.90, "cascade": 0.65}
+# Poids de causalite par type de relation.
+# direct  = 1.00 : appel synchrone premier niveau, lien causal plausible.
+# cascade = 0.70 : appel indirect en cascade, plusieurs maillons possibles.
+# Design : avec seuil high >= 0.70, cascade ne peut JAMAIS atteindre "high"
+# (max cascade = round(0.95 * 0.70, 2) = 0.66 < 0.70). Invariant garanti.
+_CALL_TYPE_WEIGHT: dict[str, float] = {"direct": 1.0, "cascade": 0.7}
 
 
-def _rca_confidence_score(anomaly_score: float, call_type: str) -> float:
+def _rca_confidence_score(anomaly_score: float, call_type: str, depth: int = 1) -> float:
     """
     Score numerique de confiance RCA dans [0.0, 0.95].
 
     DISTINCTION FONDAMENTALE :
-      anomaly_score  = intensite de l'anomalie du voisin (est-il anomal ?)
-      confidence_score = plausibilite du LIEN CAUSAL    (est-il LA cause ?)
+      anomaly_score    = intensite de l'anomalie du voisin (est-il anomal ?)
+      confidence_score = plausibilite du LIEN CAUSAL     (est-il LA cause ?)
 
-    Plafond 0.95 : une co-degradation observee en 1 saut dans une fenetre
-    temporelle n'etablit jamais une causalite certaine. Correlation != causalite.
+    Plafond 0.95 : une co-degradation observee dans une fenetre temporelle
+    n'etablit jamais une causalite certaine. Correlation != causalite.
 
-    Formule : confidence_score = min(0.95, anomaly_score * call_type_weight)
-    Poids :
-      direct  = 0.90  (appel synchrone direct, lien causal plausible)
-      cascade = 0.65  (appel indirect/interne, plusieurs maillons possibles)
+    Formule : confidence_score = min(0.95, anomaly_score * call_type_weight * depth_weight)
+      call_type_weight : direct=1.0, cascade=0.70
+      depth_weight     : 1 / depth  (penalise les causes distantes)
 
-    Exemple : cascade + anomaly_score=0.95 -> confidence_score=0.62 (medium)
+    Exemples :
+      direct  depth=1 score=0.90 -> 0.90 * 1.0 * 1.0 = 0.90 -> high
+      cascade depth=1 score=0.90 -> 0.90 * 0.7 * 1.0 = 0.63 -> medium
+      direct  depth=2 score=0.90 -> 0.90 * 1.0 * 0.5 = 0.45 -> medium
+      cascade depth=2 score=0.90 -> 0.90 * 0.7 * 0.5 = 0.32 -> low
     """
-    weight = _CALL_TYPE_WEIGHT.get(call_type, 0.75)
-    return round(min(0.95, anomaly_score * weight), 2)
+    weight       = _CALL_TYPE_WEIGHT.get(call_type, 0.75)
+    depth_weight = 1.0 / max(1, depth)
+    return round(min(0.95, anomaly_score * weight * depth_weight), 2)
 
 
 def _rca_confidence(confidence_score: float) -> str:
@@ -376,35 +388,37 @@ def _rca_confidence(confidence_score: float) -> str:
     Niveau qualitatif derive du confidence_score.
 
     Seuils :
-      high   >= 0.65  (direct + anomaly_score eleve)
-      medium >= 0.35  (signal modere ou relation cascade)
-      low    <  0.35  (signal faible, speculation non recommandee)
+      high   >= 0.70  (direct depth=1 + signal fort)
+      medium >= 0.35  (evidence moderee : cascade ou profondeur > 1)
+      low    <  0.35  (signal faible ou cause tres distante)
 
-    Design : cascade + anomaly_score=0.95 -> confidence_score=0.62 -> medium (pas high).
-    Garantit que le call_type influence le niveau, pas seulement le score d'anomalie.
+    Design : cascade (max 0.95*0.70=0.665) reste toujours en dessous du seuil high (0.70).
+    Un appel indirect ne peut pas avoir la meme certitude causale qu'un appel direct.
     """
-    if confidence_score >= 0.65: return "high"
+    if confidence_score >= 0.70: return "high"
     if confidence_score >= 0.35: return "medium"
     return "low"
 
 
-def _rca_reason(confidence: str, call_type: str) -> str:
+def _rca_reason(confidence: str, call_type: str, depth: int = 1) -> str:
     """
     Raison avec vocabulaire SRE : 'suspectee', 'correlee', 'non demontree'.
+    Mentionne la profondeur si > 1 pour contextualiser la distance causale.
     N'affirme jamais une certitude causale.
     """
+    hop_info = f", profondeur {depth}" if depth > 1 else ""
     if confidence == "high":
         return (
-            f"co-degradation correlee sur dependance {call_type} -- "
+            f"co-degradation correlee sur dependance {call_type}{hop_info} -- "
             f"causalite suspectee, non demontree"
         )
     if confidence == "medium":
         return (
-            f"co-degradation observee sur dependance {call_type} -- "
+            f"co-degradation observee sur dependance {call_type}{hop_info} -- "
             f"causalite non demontree"
         )
     return (
-        f"signal de degradation faible sur dependance {call_type} -- "
+        f"signal de degradation faible sur dependance {call_type}{hop_info} -- "
         f"correlation possible, non demontree"
     )
 
@@ -435,7 +449,7 @@ def _get_anomaly_scores(cur, endpoint_ids: list, detected_at) -> dict:
 
 def analyze_service_graph(cur, endpoint_id: str, detected_at) -> dict:
     """
-    Analyse le graphe de dependances autour d'un endpoint (voisinage 1 saut).
+    Analyse le graphe de dependances autour d'un endpoint (traversee multi-hop bornee).
 
     SEPARATION DES RESPONSABILITES :
       - Cette fonction fait de l'ATTRIBUTION causale (post-detection, best-effort).
@@ -443,47 +457,105 @@ def analyze_service_graph(cur, endpoint_id: str, detected_at) -> dict:
       - Toute exception est catchee dans l'appelant (detector.py) : une erreur
         ici ne bloque jamais une alerte.
 
+    Traversee bornee par MAX_GRAPH_DEPTH (defaut 3) avec double protection anti-cycles :
+      1. UNION (pas UNION ALL) : deduplication native dans la CTE
+      2. NOT (child_endpoint_id = ANY(path)) : protection runtime si un cycle invalide
+         echapperait au trigger trg_no_cycle
+
     Lit les anomalies du cycle precedent (transaction courante non committee).
     Lag inherent ~60 s : acceptable car PENDING -> FIRING necessite 2 cycles.
-    Limite actuelle : traversee 1 saut uniquement.
 
     Retour :
     {
         "endpoint_id":           str,
         "service":               str | None,
-        "children":              [{endpoint_id, service, call_type, status, anomaly_score, direction}],
-        "parents":               [{...}],
-        "root_cause_candidates": [{endpoint_id, service, call_type, status,
-                                   anomaly_score, direction,
-                                   confidence_score, confidence, reason}],
+        "children":              [{endpoint_id, service, call_type, depth=1, path,
+                                   status, anomaly_score, direction}],
+        "parents":               [{endpoint_id, service, call_type,
+                                   status, anomaly_score, direction}],
+        "root_cause_candidates": [{...descendants fields...,
+                                   confidence_score float[0, 0.95],
+                                   confidence str (high|medium|low),
+                                   reason str}],
     }
-    confidence_score in [0.0, 0.95] : plausibilite du lien causal (pas intensite de l'anomalie).
-    confidence in {"high", "medium", "low"} : niveau qualitatif derive du confidence_score.
+
+    confidence_score in [0.0, 0.95] : plausibilite du lien causal, penalisee par la profondeur.
+    depth : nombre de sauts depuis l'endpoint analyse (1 = enfant direct).
+    path  : liste d'endpoints de l'endpoint analyse jusqu'au candidat (inclus).
+    call_type : type de la DERNIERE arete parcourue vers ce noeud (pas du chemin complet).
+      Exemple : A --direct--> B --cascade--> C  =>  C.call_type = "cascade".
+      Pour depth=1, call_type est l'arete directe (comportement intuitif).
+    Deduplication : un meme endpoint peut etre atteignable via plusieurs chemins dans un
+      DAG en diamant. On conserve l'entree avec le meilleur confidence_score.
+    Trie par confidence_score DESC : favorise les causes proches et directes.
     Retourne {} si la table endpoint_relationships est inaccessible.
     """
     try:
-        # Voisinage direct : aretes entrant et sortant depuis/vers cet endpoint.
+        # Query 1 : descendants multi-hop via CTE recursive bornee par MAX_GRAPH_DEPTH.
+        # UNION (deduplication) + NOT ANY(path) : double protection anti-cycles.
+        # root_service : service de l'endpoint courant, propage depuis le niveau 1.
         cur.execute("""
-            SELECT parent_endpoint_id, child_endpoint_id,
-                   parent_service, child_service, call_type
-            FROM endpoint_relationships
-            WHERE parent_endpoint_id = %s OR child_endpoint_id = %s
-        """, (endpoint_id, endpoint_id))
-        edges = cur.fetchall()
+            WITH RECURSIVE descendants(endpoint_id, service, call_type, depth, path, root_service) AS (
+                SELECT
+                    er.child_endpoint_id,
+                    er.child_service,
+                    er.call_type,
+                    1,
+                    ARRAY[%s::text, er.child_endpoint_id],
+                    er.parent_service
+                FROM endpoint_relationships er
+                WHERE er.parent_endpoint_id = %s
+
+                UNION
+
+                SELECT
+                    er.child_endpoint_id,
+                    er.child_service,
+                    er.call_type,
+                    d.depth + 1,
+                    d.path || er.child_endpoint_id,
+                    d.root_service
+                FROM endpoint_relationships er
+                JOIN descendants d ON er.parent_endpoint_id = d.endpoint_id
+                WHERE d.depth < %s
+                  AND NOT (er.child_endpoint_id = ANY(d.path))
+            )
+            SELECT endpoint_id, service, call_type, depth, path, root_service
+            FROM descendants
+            ORDER BY depth, endpoint_id
+        """, (endpoint_id, endpoint_id, MAX_GRAPH_DEPTH))
+        desc_rows = cur.fetchall()
     except Exception as e:
-        log.warning(f"analyze_service_graph: lecture endpoint_relationships echouee : {e}")
+        log.warning(f"analyze_service_graph: lecture descendants echouee : {e}")
         return {}
 
-    children_raw = []   # (child_id, child_service, call_type)
-    parents_raw  = []   # (parent_id, parent_service, call_type)
+    try:
+        # Query 2 : parents 1-hop avec child_service pour deriver current_service.
+        cur.execute("""
+            SELECT parent_endpoint_id, parent_service, child_service, call_type
+            FROM endpoint_relationships
+            WHERE child_endpoint_id = %s
+        """, (endpoint_id,))
+        parent_rows = cur.fetchall()
+    except Exception as e:
+        log.warning(f"analyze_service_graph: lecture parents echouee : {e}")
+        parent_rows = []
 
-    for parent_id, child_id, parent_svc, child_svc, call_type in edges:
-        if parent_id == endpoint_id:
-            children_raw.append((child_id, child_svc, call_type))
-        else:
-            parents_raw.append((parent_id, parent_svc, call_type))
+    # Service de l'endpoint courant (deux sources complementaires) :
+    #   1. child_service d'une arete entrante (si l'endpoint a des parents)
+    #   2. root_service propage par la CTE (si l'endpoint est une racine avec enfants)
+    current_service = None
+    for _, _, child_svc, _ in parent_rows:
+        if child_svc:
+            current_service = child_svc
+            break
+    if current_service is None and desc_rows:
+        current_service = desc_rows[0][5]  # root_service du premier descendant
 
-    all_neighbor_ids = [c[0] for c in children_raw] + [p[0] for p in parents_raw]
+    # IDs de tous les voisins pour le lookup d'anomalies (cycle precedent).
+    all_neighbor_ids = list(
+        {row[0] for row in desc_rows} | {row[0] for row in parent_rows}
+    )
 
     try:
         scores = _get_anomaly_scores(cur, all_neighbor_ids, detected_at)
@@ -491,50 +563,66 @@ def analyze_service_graph(cur, endpoint_id: str, detected_at) -> dict:
         log.warning(f"analyze_service_graph: lecture anomalies echouee : {e}")
         scores = {}
 
-    def _enrich(ep_id, service, call_type):
-        anm = scores.get(ep_id, {})
+    def _enrich_desc(row):
+        ep_id, svc, call_type, depth, path, _ = row
+        anm       = scores.get(ep_id, {})
         direction = anm.get("direction")
         return {
             "endpoint_id":   ep_id,
-            "service":       service,
+            "service":       svc,
+            "call_type":     call_type,
+            "depth":         depth,
+            "path":          list(path) if path else [],
+            "status":        _status_from_direction(direction),
+            "anomaly_score": anm.get("score"),
+            "direction":     direction,
+        }
+
+    def _enrich_parent(row):
+        p_id, p_svc, _, call_type = row
+        anm       = scores.get(p_id, {})
+        direction = anm.get("direction")
+        return {
+            "endpoint_id":   p_id,
+            "service":       p_svc,
             "call_type":     call_type,
             "status":        _status_from_direction(direction),
             "anomaly_score": anm.get("score"),
             "direction":     direction,
         }
 
-    children = [_enrich(*c) for c in children_raw]
-    parents  = [_enrich(*p) for p in parents_raw]
+    all_descendants = [_enrich_desc(row) for row in desc_rows]
+    children = [d for d in all_descendants if d["depth"] == 1]
+    parents  = [_enrich_parent(row) for row in parent_rows]
 
-    # Candidats root-cause : enfants degrades, tries par score descendant.
-    # confidence_score : score numerique [0, 0.95] -- distinct du score d'anomalie.
-    # confidence       : niveau qualitatif derive du score (high/medium/low).
-    # reason           : explication avec vocabulaire SRE (non demontree, suspectee).
-    def _build_candidate(c: dict) -> dict:
-        cs     = _rca_confidence_score(c["anomaly_score"], c["call_type"])
+    # Candidats root-cause : tous descendants degrades (depth 1..MAX_GRAPH_DEPTH).
+    # depth_weight = 1/depth penalise mecaniquement les causes distantes.
+    def _build_candidate(d: dict) -> dict:
+        cs     = _rca_confidence_score(d["anomaly_score"], d["call_type"], d["depth"])
         conf   = _rca_confidence(cs)
-        reason = _rca_reason(conf, c["call_type"])
-        return {**c, "confidence_score": cs, "confidence": conf, "reason": reason}
+        reason = _rca_reason(conf, d["call_type"], d["depth"])
+        return {**d, "confidence_score": cs, "confidence": conf, "reason": reason}
 
+    # Deduplication DAG diamant : un meme endpoint peut etre atteignable via plusieurs
+    # chemins (ex: A->B->D et A->C->D). On garde l'entree avec le meilleur
+    # confidence_score (chemin direct/peu profond prefere mecaniquement).
+    raw_candidates = [
+        _build_candidate(d)
+        for d in all_descendants
+        if d["direction"] == "degradation" and d["anomaly_score"] is not None
+    ]
+    best_by_ep: dict[str, dict] = {}
+    for cand in raw_candidates:
+        ep = cand["endpoint_id"]
+        if ep not in best_by_ep or cand["confidence_score"] > best_by_ep[ep]["confidence_score"]:
+            best_by_ep[ep] = cand
+
+    # Tri par confidence_score DESC : favorise les causes proches et directes.
     root_cause_candidates = sorted(
-        [
-            _build_candidate(c)
-            for c in children
-            if c["direction"] == "degradation" and c["anomaly_score"] is not None
-        ],
-        key=lambda c: c["anomaly_score"],
+        best_by_ep.values(),
+        key=lambda c: c["confidence_score"],
         reverse=True,
     )
-
-    # Service de l'endpoint analyse, derive des aretes (None si endpoint isole).
-    current_service = None
-    for p_id, c_id, p_svc, c_svc, _ in edges:
-        if p_id == endpoint_id and p_svc:
-            current_service = p_svc
-            break
-        if c_id == endpoint_id and c_svc:
-            current_service = c_svc
-            break
 
     result = {
         "endpoint_id":           endpoint_id,
@@ -549,7 +637,7 @@ def analyze_service_graph(cur, endpoint_id: str, detected_at) -> dict:
             f"Service graph [{endpoint_id}]: "
             f"{len(root_cause_candidates)} candidat(s) root-cause -- "
             + ", ".join(
-                f"{c['endpoint_id']}(score={c['anomaly_score']:.2f})"
+                f"{c['endpoint_id']}(score={c['anomaly_score']:.2f},depth={c['depth']})"
                 for c in root_cause_candidates
             )
         )

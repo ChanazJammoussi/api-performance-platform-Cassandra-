@@ -47,10 +47,20 @@ future work") and must not be "fixed" back to spec.
   **Protection DAG:** trigger `trg_no_cycle` (CTE recursive UNION, BEFORE INSERT/UPDATE) +
   CHECK `parent_endpoint_id <> child_endpoint_id`. Cycles are rejected at the DB level.
 
-  **Current limitation — 1-hop traversal only:** `analyze_service_graph()` loads only the
-  immediate neighbourhood (children and parents, 1 step). Multi-hop chains (e.g. `/api/payments`
-  seeing `/orders/{order_id}` as root cause through intermediate `/payments`) require correlating
-  multiple co-firing alerts. Recursive traversal is intentionally deferred (P2).
+  **P2 — Traversee multi-hop bornee (implemented):** `analyze_service_graph()` utilise une
+  CTE `WITH RECURSIVE` bornee par `MAX_GRAPH_DEPTH` (defaut 3, env `MAX_GRAPH_DEPTH`).
+  Protection double anti-cycles : UNION SQL + `NOT (child = ANY(path))` runtime.
+  Index `idx_endpoint_relationships_child` sur `child_endpoint_id`.
+
+  **Scoring P2 :** `confidence_score = min(0.95, anomaly_score × call_type_weight × (1/depth))`
+  avec `direct=1.00`, `cascade=0.70`. Seuil `high >= 0.70` garantit que cascade (max 0.66)
+  reste toujours `medium` ou `low`. Tri des candidats par `confidence_score` DESC.
+
+  **Champs JSON ajoutes (retro-compatibles) :** `depth` (int), `path` (list[str]) dans
+  `root_cause_candidates`. `children` = voisins depth=1 uniquement.
+
+  **Limite P2 :** parents toujours 1-hop. Chaines > MAX_GRAPH_DEPTH non resolues.
+  RCA approximative basee graphe — pas un remplacement du distributed tracing.
 
   **Invariant (hard constraint):** DAG analysis is strictly post-scoring and best-effort. An
   exception in `analyze_service_graph()` never blocks Layer 0/1/2, the state machine, or the
