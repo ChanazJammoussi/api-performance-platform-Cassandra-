@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS endpoint_features (
     p95_ms         DOUBLE PRECISION,
     p99_ms         DOUBLE PRECISION,
     error_rate_5xx DOUBLE PRECISION,
-    error_rate_4xx DOUBLE PRECISION
+    error_rate_4xx DOUBLE PRECISION,
+    service_tier   TEXT          -- 'gateway' (user-facing) | 'service' (interne)
 );
 
 SELECT create_hypertable('endpoint_features', 'time', if_not_exists => TRUE);
@@ -203,6 +204,75 @@ CREATE TABLE IF NOT EXISTS model_health (
 );
 
 CREATE INDEX IF NOT EXISTS idx_model_health_time ON model_health (checked_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- endpoint_relationships : DAG des dependances inter-services.
+-- Chaque ligne modelise un appel HTTP entre deux endpoints (direction : appelant
+-- -> appele). Contraintes : aucun cycle (trigger trg_no_cycle) + aucune auto-reference.
+--   call_type : 'direct' = appel synchrone premier niveau
+--               'cascade' = propagation indirecte (ex: payments appelle orders)
+--   parent_service / child_service : noms de service pour le raisonnement LLM
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS endpoint_relationships (
+    parent_endpoint_id TEXT NOT NULL,
+    child_endpoint_id  TEXT NOT NULL,
+    parent_service     TEXT,
+    child_service      TEXT,
+    call_type          TEXT NOT NULL DEFAULT 'direct',
+    metadata           JSONB DEFAULT '{}',
+    PRIMARY KEY (parent_endpoint_id, child_endpoint_id),
+    CONSTRAINT no_self_loop CHECK (parent_endpoint_id <> child_endpoint_id)
+);
+
+-- Detecte les cycles avant insertion : le parent ne doit pas etre atteignable
+-- en suivant les aretes depuis l'enfant (propriete DAG).
+-- La CTE utilise UNION (deduplication) pour terminer meme sur un graphe dense.
+CREATE OR REPLACE FUNCTION check_endpoint_relationship_no_cycle()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $func$
+BEGIN
+    PERFORM 1
+    FROM (
+        WITH RECURSIVE descendants AS (
+            SELECT child_endpoint_id AS node
+            FROM   endpoint_relationships
+            WHERE  parent_endpoint_id = NEW.child_endpoint_id
+            UNION
+            SELECT er.child_endpoint_id
+            FROM   endpoint_relationships er
+            JOIN   descendants d ON er.parent_endpoint_id = d.node
+        )
+        SELECT node FROM descendants
+    ) sub
+    WHERE sub.node = NEW.parent_endpoint_id;
+    IF FOUND THEN
+        RAISE EXCEPTION 'endpoint_relationships : cycle detecte (% -> %)',
+            NEW.parent_endpoint_id, NEW.child_endpoint_id;
+    END IF;
+    RETURN NEW;
+END;
+$func$;
+
+DROP TRIGGER IF EXISTS trg_no_cycle ON endpoint_relationships;
+CREATE TRIGGER trg_no_cycle
+    BEFORE INSERT OR UPDATE ON endpoint_relationships
+    FOR EACH ROW
+    EXECUTE FUNCTION check_endpoint_relationship_no_cycle();
+
+-- Topologie d'appel de la stack de demonstration (idempotent).
+INSERT INTO endpoint_relationships
+    (parent_endpoint_id, child_endpoint_id, parent_service, child_service, call_type, metadata)
+VALUES
+    ('GET /api/orders/{order_id}', 'GET /orders/{order_id}', 'gateway',  'orders',   'direct',  '{}'),
+    ('GET /api/orders',            'GET /orders',            'gateway',  'orders',   'direct',  '{}'),
+    ('POST /api/payments',         'POST /payments',         'gateway',  'payments', 'direct',  '{}'),
+    ('POST /payments', 'GET /orders/{order_id}', 'payments', 'orders',   'cascade',
+     '{"reason":"order_validation","description":"payments valide la commande avant traitement"}')
+ON CONFLICT DO NOTHING;
+
+-- Migration idempotente : colonne service_tier sur endpoint_features existante.
+ALTER TABLE endpoint_features ADD COLUMN IF NOT EXISTS service_tier TEXT;
 
 -- ---------------------------------------------------------------------------
 -- Compression (chunks > 7j) + retention (purge > 90j) des hypertables.

@@ -465,3 +465,42 @@ Sequential phases, ~52 core days. Each phase ends with a demoable checkpoint.
   levier est le **seuil du score combiné** : F1 maximal à **0.60** (Recall 71 %, Precision 71 %,
   1.45 FP/h) contre 0.698 à 0.50. À réviser après une campagne plus large.
 
+---
+
+## 16. Extensions implémentées (hors spec initiale)
+
+> Extensions ajoutées pendant l'implémentation pour renforcer l'attribution causale.
+> Chacune est documentée dans `CLAUDE.md` (section "Deliberate architectural extensions").
+
+### DAG de dépendances de service (`endpoint_relationships`)
+
+**Motivation.** La spec §5.6 mentionne la corrélation déploiement mais ne modélise pas
+les dépendances inter-services. En pratique, une dégradation du service `orders` se
+manifeste aussi sur les endpoints `gateway` et `payments` qui l'appellent. Sans modèle
+de topologie, Cassandra ne peut pas distinguer une cause locale d'une propagation.
+
+**Implémentation.**
+
+- Table `endpoint_relationships` : `(parent_endpoint_id, child_endpoint_id)` PK composite,
+  `parent_service`, `child_service`, `call_type` (`direct` | `cascade`), `metadata JSONB`.
+- Colonne `service_tier` sur `endpoint_features` : `gateway` (user-facing) | `service` (interne).
+- Protection cycle : trigger `trg_no_cycle` (CTE récursive `UNION` dans une fonction PL/pgSQL
+  `BEFORE INSERT/UPDATE`) + `CHECK (parent_endpoint_id <> child_endpoint_id)`.
+- Fonction `correlator.analyze_service_graph(cur, endpoint_id, detected_at)` :
+  voisinage 1 saut, enrichissement avec scores d'anomalie du cycle précédent,
+  `root_cause_candidates` (enfants dégradés, triés par score, avec champ `reason`),
+  champs `status` (`degraded` / `improved` / `normal` / `unknown`) pour le LLM.
+- Résultat injecté dans `contributing_features.service_attribution` (JSONB) dans la boucle
+  PENDING du détecteur, disponible à la lecture par l'explainer au cycle FIRING suivant.
+- Priorité 1 dans `_fallback_explanation` : si `root_cause_candidates` est non vide,
+  le fallback produit une cause lisible sans LLM.
+
+**Invariants respectés.**
+
+- Layer 0/1/2 non modifiés : `analyze_service_graph` est appelée **après** le scoring,
+  dans un `try/except` qui n'interfère jamais avec la décision de détection.
+- Fautes injectées : contrainte d'exclusion du test set non impactée (pas de lien avec
+  `endpoint_relationships`).
+- Pas de FK vers `endpoint_features` (hypertable TimescaleDB incompatible avec FK sur
+  table compressée).
+

@@ -234,7 +234,157 @@ flowchart TD
 
 ---
 
-## 8. Responsabilités par module (`detection-service/`)
+## 8. Modèle parent-enfant — DAG de dépendances de service
+
+Extension délibérée vs spec (documentée ici conformément à `CLAUDE.md`).
+
+La stack de démo crée un graphe orienté acyclique (DAG) entre les endpoints
+instrumentés : la gateway reçoit le trafic utilisateur et propage les appels
+vers les services internes, qui peuvent eux-mêmes s'appeler en cascade.
+
+```mermaid
+graph LR
+    GW_ORD["GET /api/orders/{order_id}<br/>(gateway)"]
+    GW_ORDS["GET /api/orders<br/>(gateway)"]
+    GW_PAY["POST /api/payments<br/>(gateway)"]
+    SVC_ORD["GET /orders/{order_id}<br/>(orders)"]
+    SVC_ORDS["GET /orders<br/>(orders)"]
+    SVC_PAY["POST /payments<br/>(payments)"]
+
+    GW_ORD  -->|direct|  SVC_ORD
+    GW_ORDS -->|direct|  SVC_ORDS
+    GW_PAY  -->|direct|  SVC_PAY
+    SVC_PAY -->|cascade| SVC_ORD
+```
+
+`GET /orders/{order_id}` a **deux parents** (gateway + payments) : c'est un DAG,
+pas un arbre. La table `endpoint_relationships` (PRIMARY KEY composite) représente
+ce cas correctement — un simple `parent_endpoint_id TEXT` sur `endpoint_features`
+ne suffirait pas.
+
+### Scénario de propagation (exemple `bad_deploy` sur orders)
+
+```
+POST /api/payments ──direct──► POST /payments ──cascade──► GET /orders/{order_id}
+     gateway                      payments                       orders
+  [FIRING 0.78]                [FIRING 0.82]                 [FIRING 0.91]
+```
+
+Quand `POST /api/payments` passe en FIRING (cycle N+1) :
+
+1. `analyze_service_graph` charge le voisinage direct (1 saut).
+2. `POST /payments` est enfant direct, score=0.82, direction=`degradation`.
+3. Il entre dans `root_cause_candidates` avec `reason="degradation de dependance direct"`.
+4. `service_attribution` est injecté dans `contributing_features` (JSONB, cycle N).
+5. L'explainer (LLM ou fallback) lit ce contexte au moment FIRING pour formuler la cause.
+
+> **Limite 1-hop :** `GET /orders/{order_id}` n'est pas visible depuis `POST /api/payments`
+> (2 sauts). La chaîne complète est lisible en consultant l'alerte `POST /payments`.
+
+### Schéma `service_attribution` (extrait de `contributing_features`)
+
+```json
+{
+  "endpoint_id": "POST /api/payments",
+  "service":     "gateway",
+  "children": [
+    { "endpoint_id": "POST /payments", "service": "payments",
+      "call_type": "direct", "status": "degraded",
+      "anomaly_score": 0.82, "direction": "degradation" }
+  ],
+  "parents": [],
+  "root_cause_candidates": [
+    { "endpoint_id": "POST /payments", "service": "payments",
+      "call_type": "direct", "status": "degraded",
+      "anomaly_score": 0.82, "direction": "degradation",
+      "confidence_score": 0.74,
+      "confidence": "high",
+      "reason": "co-degradation correlee sur dependance direct -- causalite suspectee, non demontree" }
+  ]
+}
+```
+
+### Propriétés garanties par la DB
+
+- **Aucun cycle** : trigger `trg_no_cycle` (CTE récursive `UNION`, `BEFORE INSERT/UPDATE`).
+- **Aucune auto-référence** : `CHECK (parent_endpoint_id <> child_endpoint_id)`.
+- **Pas de FK** vers `endpoint_features` : hypertable TimescaleDB incompatible avec FK
+  sur table compressée.
+
+### Invariant de détection
+
+Les couches Layer 0/1/2 opèrent sur `endpoint_features` uniquement, sans aucune
+dépendance à `endpoint_relationships`. L'analyse DAG est une étape **post-scoring,
+best-effort**, wrappée dans un `try/except` dans `detector.py` : une erreur ici
+ne bloque jamais une alerte.
+
+### Design rationale — pourquoi cette architecture
+
+**1. Pourquoi une table relation et non `parent_endpoint_id` sur `endpoint_features`**
+
+Un `parent_endpoint_id TEXT` ne peut modéliser qu'un arbre. `GET /orders/{order_id}`
+a deux parents distincts :
+
+```
+GET /api/orders/{order_id}  ──direct──►  GET /orders/{order_id}
+POST /payments               ──cascade─►  GET /orders/{order_id}
+```
+
+La relation est un DAG. La table `endpoint_relationships` avec PK composite
+`(parent_endpoint_id, child_endpoint_id)` représente ce cas correctement.
+
+**2. Topologie de la stack de démo**
+
+```
+        [gateway :8000]
+        /       |       \
+       /        |        \
+GET /api/orders  GET /api/orders/{order_id}  POST /api/payments
+       |                 |                          |
+   direct            direct                      direct
+       |                 |                          |
+GET /orders        GET /orders/{order_id}     POST /payments
+                          ^                         |
+                          |                       cascade
+                          +-------------------------+
+                        (POST /payments valide la commande)
+```
+
+**3. Limitation actuelle : traversée 1-hop uniquement**
+
+`analyze_service_graph` ne charge que le voisinage direct (1 saut) :
+
+```sql
+WHERE parent_endpoint_id = %s OR child_endpoint_id = %s
+```
+
+La cause profonde d'une chaîne `A → B → C` n'est visible depuis A que si B est
+en dégradation. La chaîne complète est lisible en consultant l'alerte de B.
+
+**Note : `anomaly_score` ≠ `confidence_score`**
+
+`anomaly_score` mesure l'intensité de l'anomalie du voisin (est-il anomal ?).
+`confidence_score` mesure la plausibilité du **lien causal** (est-il LA cause ?), calculé comme
+`min(0.95, anomaly_score × call_type_weight)` avec `direct=0.90`, `cascade=0.65`. Plafond 0.95 :
+la corrélation observée en 1 saut n'établit jamais une causalité certaine.
+
+Exemple : `anomaly_score=0.95` sur cascade → `confidence_score=0.62` → niveau `medium` (pas `high`).
+
+**4. Pourquoi cette limitation est acceptable**
+
+- Chaque alerte conserve son propre contexte de voisinage — aucune alerte ne peut
+  masquer en une autre.
+- Une traversée multi-hop risquerait des fausses attributions : un nœud dégradé
+  à 3 sauts peut être totalement indépendant.
+- En pratique, le cas critique est la propagation directe (1 saut) : `gateway → service`.
+  La chaîne `gateway → payments → orders` génère 3 alertes, chacune avec son candidat
+  root-cause direct. L'opérateur peut reconstituer la chaîne en les consultant.
+- L'extension multi-hop reste possible (P2) sans modifier l'architecture existante :
+  il suffit d'étendre la requête SQL avec un CTE récursif limité en profondeur.
+
+---
+
+## 10. Responsabilités par module (`detection-service/`)
 
 | Module | Responsabilité |
 |---|---|

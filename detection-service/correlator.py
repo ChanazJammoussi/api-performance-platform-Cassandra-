@@ -331,3 +331,231 @@ def write_correlation(cur, endpoint_id: str, signal_type: str, result: dict | No
             f"score={result['imputation_score']:.3f} "
             f"service_match={result['service_match']}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Analyse du graphe de dependances (DAG endpoint_relationships)
+# ---------------------------------------------------------------------------
+
+def _status_from_direction(direction: str | None) -> str:
+    """Convertit une direction d'anomalie en statut lisible (JSON + LLM)."""
+    if direction == "degradation":  return "degraded"
+    if direction == "improvement":  return "improved"
+    if direction is not None:       return "normal"
+    return "unknown"
+
+
+# Poids de causalite par type de relation (direct = lien synchrone, cascade = indirect)
+_CALL_TYPE_WEIGHT: dict[str, float] = {"direct": 0.90, "cascade": 0.65}
+
+
+def _rca_confidence_score(anomaly_score: float, call_type: str) -> float:
+    """
+    Score numerique de confiance RCA dans [0.0, 0.95].
+
+    DISTINCTION FONDAMENTALE :
+      anomaly_score  = intensite de l'anomalie du voisin (est-il anomal ?)
+      confidence_score = plausibilite du LIEN CAUSAL    (est-il LA cause ?)
+
+    Plafond 0.95 : une co-degradation observee en 1 saut dans une fenetre
+    temporelle n'etablit jamais une causalite certaine. Correlation != causalite.
+
+    Formule : confidence_score = min(0.95, anomaly_score * call_type_weight)
+    Poids :
+      direct  = 0.90  (appel synchrone direct, lien causal plausible)
+      cascade = 0.65  (appel indirect/interne, plusieurs maillons possibles)
+
+    Exemple : cascade + anomaly_score=0.95 -> confidence_score=0.62 (medium)
+    """
+    weight = _CALL_TYPE_WEIGHT.get(call_type, 0.75)
+    return round(min(0.95, anomaly_score * weight), 2)
+
+
+def _rca_confidence(confidence_score: float) -> str:
+    """
+    Niveau qualitatif derive du confidence_score.
+
+    Seuils :
+      high   >= 0.65  (direct + anomaly_score eleve)
+      medium >= 0.35  (signal modere ou relation cascade)
+      low    <  0.35  (signal faible, speculation non recommandee)
+
+    Design : cascade + anomaly_score=0.95 -> confidence_score=0.62 -> medium (pas high).
+    Garantit que le call_type influence le niveau, pas seulement le score d'anomalie.
+    """
+    if confidence_score >= 0.65: return "high"
+    if confidence_score >= 0.35: return "medium"
+    return "low"
+
+
+def _rca_reason(confidence: str, call_type: str) -> str:
+    """
+    Raison avec vocabulaire SRE : 'suspectee', 'correlee', 'non demontree'.
+    N'affirme jamais une certitude causale.
+    """
+    if confidence == "high":
+        return (
+            f"co-degradation correlee sur dependance {call_type} -- "
+            f"causalite suspectee, non demontree"
+        )
+    if confidence == "medium":
+        return (
+            f"co-degradation observee sur dependance {call_type} -- "
+            f"causalite non demontree"
+        )
+    return (
+        f"signal de degradation faible sur dependance {call_type} -- "
+        f"correlation possible, non demontree"
+    )
+
+
+def _get_anomaly_scores(cur, endpoint_ids: list, detected_at) -> dict:
+    """
+    Score d'anomalie le plus recent pour chaque endpoint dans la fenetre
+    [detected_at - 10min, detected_at]. Lit les anomalies du cycle precedent
+    (la transaction courante n'est pas encore committee).
+
+    Retourne {endpoint_id: {"score": float|None, "direction": str|None}}.
+    """
+    if not endpoint_ids:
+        return {}
+    cur.execute("""
+        SELECT DISTINCT ON (endpoint_id)
+            endpoint_id, score, direction
+        FROM anomalies
+        WHERE endpoint_id = ANY(%s)
+          AND detected_at BETWEEN %s - INTERVAL '10 minutes' AND %s
+        ORDER BY endpoint_id, detected_at DESC
+    """, (endpoint_ids, detected_at, detected_at))
+    return {
+        row[0]: {"score": row[1], "direction": row[2]}
+        for row in cur.fetchall()
+    }
+
+
+def analyze_service_graph(cur, endpoint_id: str, detected_at) -> dict:
+    """
+    Analyse le graphe de dependances autour d'un endpoint (voisinage 1 saut).
+
+    SEPARATION DES RESPONSABILITES :
+      - Cette fonction fait de l'ATTRIBUTION causale (post-detection, best-effort).
+      - Elle n'influence PAS la decision de detection (Layer 0/1/2).
+      - Toute exception est catchee dans l'appelant (detector.py) : une erreur
+        ici ne bloque jamais une alerte.
+
+    Lit les anomalies du cycle precedent (transaction courante non committee).
+    Lag inherent ~60 s : acceptable car PENDING -> FIRING necessite 2 cycles.
+    Limite actuelle : traversee 1 saut uniquement.
+
+    Retour :
+    {
+        "endpoint_id":           str,
+        "service":               str | None,
+        "children":              [{endpoint_id, service, call_type, status, anomaly_score, direction}],
+        "parents":               [{...}],
+        "root_cause_candidates": [{endpoint_id, service, call_type, status,
+                                   anomaly_score, direction,
+                                   confidence_score, confidence, reason}],
+    }
+    confidence_score in [0.0, 0.95] : plausibilite du lien causal (pas intensite de l'anomalie).
+    confidence in {"high", "medium", "low"} : niveau qualitatif derive du confidence_score.
+    Retourne {} si la table endpoint_relationships est inaccessible.
+    """
+    try:
+        # Voisinage direct : aretes entrant et sortant depuis/vers cet endpoint.
+        cur.execute("""
+            SELECT parent_endpoint_id, child_endpoint_id,
+                   parent_service, child_service, call_type
+            FROM endpoint_relationships
+            WHERE parent_endpoint_id = %s OR child_endpoint_id = %s
+        """, (endpoint_id, endpoint_id))
+        edges = cur.fetchall()
+    except Exception as e:
+        log.warning(f"analyze_service_graph: lecture endpoint_relationships echouee : {e}")
+        return {}
+
+    children_raw = []   # (child_id, child_service, call_type)
+    parents_raw  = []   # (parent_id, parent_service, call_type)
+
+    for parent_id, child_id, parent_svc, child_svc, call_type in edges:
+        if parent_id == endpoint_id:
+            children_raw.append((child_id, child_svc, call_type))
+        else:
+            parents_raw.append((parent_id, parent_svc, call_type))
+
+    all_neighbor_ids = [c[0] for c in children_raw] + [p[0] for p in parents_raw]
+
+    try:
+        scores = _get_anomaly_scores(cur, all_neighbor_ids, detected_at)
+    except Exception as e:
+        log.warning(f"analyze_service_graph: lecture anomalies echouee : {e}")
+        scores = {}
+
+    def _enrich(ep_id, service, call_type):
+        anm = scores.get(ep_id, {})
+        direction = anm.get("direction")
+        return {
+            "endpoint_id":   ep_id,
+            "service":       service,
+            "call_type":     call_type,
+            "status":        _status_from_direction(direction),
+            "anomaly_score": anm.get("score"),
+            "direction":     direction,
+        }
+
+    children = [_enrich(*c) for c in children_raw]
+    parents  = [_enrich(*p) for p in parents_raw]
+
+    # Candidats root-cause : enfants degrades, tries par score descendant.
+    # confidence_score : score numerique [0, 0.95] -- distinct du score d'anomalie.
+    # confidence       : niveau qualitatif derive du score (high/medium/low).
+    # reason           : explication avec vocabulaire SRE (non demontree, suspectee).
+    def _build_candidate(c: dict) -> dict:
+        cs     = _rca_confidence_score(c["anomaly_score"], c["call_type"])
+        conf   = _rca_confidence(cs)
+        reason = _rca_reason(conf, c["call_type"])
+        return {**c, "confidence_score": cs, "confidence": conf, "reason": reason}
+
+    root_cause_candidates = sorted(
+        [
+            _build_candidate(c)
+            for c in children
+            if c["direction"] == "degradation" and c["anomaly_score"] is not None
+        ],
+        key=lambda c: c["anomaly_score"],
+        reverse=True,
+    )
+
+    # Service de l'endpoint analyse, derive des aretes (None si endpoint isole).
+    current_service = None
+    for p_id, c_id, p_svc, c_svc, _ in edges:
+        if p_id == endpoint_id and p_svc:
+            current_service = p_svc
+            break
+        if c_id == endpoint_id and c_svc:
+            current_service = c_svc
+            break
+
+    result = {
+        "endpoint_id":           endpoint_id,
+        "service":               current_service,
+        "children":              children,
+        "parents":               parents,
+        "root_cause_candidates": root_cause_candidates,
+    }
+
+    if root_cause_candidates:
+        log.info(
+            f"Service graph [{endpoint_id}]: "
+            f"{len(root_cause_candidates)} candidat(s) root-cause -- "
+            + ", ".join(
+                f"{c['endpoint_id']}(score={c['anomaly_score']:.2f})"
+                for c in root_cause_candidates
+            )
+        )
+    else:
+        log.debug(
+            f"Service graph [{endpoint_id}]: "
+            f"{len(children)} enfant(s), {len(parents)} parent(s), aucun candidat"
+        )
+    return result

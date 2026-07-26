@@ -6,7 +6,11 @@ import logging
 import psycopg2
 from datetime import datetime, timezone
 from notifier import send_slack_alert
-from correlator import correlate, write_correlation, correlate_deploy, write_deploy_correlation
+from correlator import (
+    correlate, write_correlation,
+    correlate_deploy, write_deploy_correlation,
+    analyze_service_graph,
+)
 from explainer import generate_explanation
 from baseline_utils import (
     get_baseline, get_baselines, compute_deviation, pg_dow,
@@ -473,6 +477,16 @@ def run_detection(conn):
                 "band": [round(p10, 2), round(p90, 2)] if (p10 is not None and p90 is not None) else None,
             },
         }
+
+        # Analyse du graphe de dependances : enrichit contributing avec les
+        # scores des voisins (cycle precedent -- transaction non committee).
+        # Best-effort : une erreur ne bloque ni l'anomaly store ni l'alerte.
+        try:
+            graph = analyze_service_graph(cur, endpoint_id, ts)
+            if graph.get("children") or graph.get("parents"):
+                contributing["service_attribution"] = graph
+        except Exception as e:
+            log.warning(f"Service graph analysis failed for {endpoint_id}: {e}")
 
         # Anomaly store : un enregistrement par cycle scoree (spec 6.3), best-effort.
         try:

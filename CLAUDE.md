@@ -24,6 +24,38 @@ When a task is ambiguous, the spec wins; if the spec is silent, ask.
 - **`deploy_events`:** `deploy_id` is UUID (spec §6.5 says text); no `kind` column yet, so
   correlation uses temporal proximity only (no event-kind priors §5.6 yet).
 
+## Deliberate architectural extensions
+
+These go beyond what the spec describes (§5.6 states "trace-topology propagation is explicit
+future work") and must not be "fixed" back to spec.
+
+- **Service dependency DAG (`endpoint_relationships` + `service_tier`):**
+  `correlator.py::analyze_service_graph()` enriches each anomaly's `contributing_features`
+  with a `service_attribution` block derived from a dedicated `endpoint_relationships` table.
+
+  **Why a relation table, not a `parent_endpoint_id` column:** `GET /orders/{order_id}` is
+  called by two distinct parents:
+  ```
+  GET /api/orders/{order_id}  ──direct──►  GET /orders/{order_id}
+  POST /payments               ──cascade─►  GET /orders/{order_id}
+  ```
+  A single column models a tree; the real call graph is a DAG. The table stores directed edges
+  with `(parent_endpoint_id, child_endpoint_id)` as the composite primary key, plus
+  `parent_service`/`child_service` for LLM-level service-name reasoning and `call_type`
+  (`direct` | `cascade`) to distinguish proxy calls from internal cascades.
+
+  **Protection DAG:** trigger `trg_no_cycle` (CTE recursive UNION, BEFORE INSERT/UPDATE) +
+  CHECK `parent_endpoint_id <> child_endpoint_id`. Cycles are rejected at the DB level.
+
+  **Current limitation — 1-hop traversal only:** `analyze_service_graph()` loads only the
+  immediate neighbourhood (children and parents, 1 step). Multi-hop chains (e.g. `/api/payments`
+  seeing `/orders/{order_id}` as root cause through intermediate `/payments`) require correlating
+  multiple co-firing alerts. Recursive traversal is intentionally deferred (P2).
+
+  **Invariant (hard constraint):** DAG analysis is strictly post-scoring and best-effort. An
+  exception in `analyze_service_graph()` never blocks Layer 0/1/2, the state machine, or the
+  alert path. See `detector.py` for the wrapping `try/except`.
+
 ## Phase 3 implementation contract (ML detection) — MUST follow
 
 The spec parts that constrain Phase 3 are §5.2, §5.3, §5.4, §6.3, §8.1, §8.3. Non-negotiables:

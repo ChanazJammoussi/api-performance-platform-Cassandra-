@@ -1,3 +1,4 @@
+import json
 import os
 import time
 import logging
@@ -14,11 +15,25 @@ PROMETHEUS_URL = os.environ.get("PROMETHEUS_URL", "http://127.0.0.1:9090")
 DB_URL = os.environ.get("DATABASE_URL", "postgresql://cassandra:cassandra@localhost:5434/cassandra")
 
 ENDPOINTS = [
-    {"service": "orders",   "route": "/orders/{order_id}", "method": "GET"},
-    {"service": "orders",   "route": "/orders",            "method": "GET"},
-    {"service": "payments", "route": "/payments",          "method": "POST"},
-    {"service": "gateway",  "route": "/api/orders/{order_id}", "method": "GET"},
-    {"service": "gateway",  "route": "/api/payments",     "method": "POST"},
+    # Tier gateway : endpoints user-facing (proxy vers les services)
+    {"service": "gateway",  "route": "/api/orders/{order_id}", "method": "GET",  "service_tier": "gateway"},
+    {"service": "gateway",  "route": "/api/orders",            "method": "GET",  "service_tier": "gateway"},
+    {"service": "gateway",  "route": "/api/payments",          "method": "POST", "service_tier": "gateway"},
+    # Tier service : endpoints metier internes instrumes par OTel
+    {"service": "orders",   "route": "/orders/{order_id}",     "method": "GET",  "service_tier": "service"},
+    {"service": "orders",   "route": "/orders",                "method": "GET",  "service_tier": "service"},
+    {"service": "payments", "route": "/payments",              "method": "POST", "service_tier": "service"},
+]
+
+# Topologie d'appel : source unique de verite partagee avec init.sql.
+# Peuplee dans endpoint_relationships au demarrage (idempotent).
+RELATIONSHIPS = [
+    # parent_id                       child_id                    parent_svc   child_svc   call_type   metadata
+    ("GET /api/orders/{order_id}", "GET /orders/{order_id}", "gateway",  "orders",   "direct",  {}),
+    ("GET /api/orders",            "GET /orders",            "gateway",  "orders",   "direct",  {}),
+    ("POST /api/payments",         "POST /payments",         "gateway",  "payments", "direct",  {}),
+    ("POST /payments", "GET /orders/{order_id}", "payments", "orders",   "cascade",
+     {"reason": "order_validation", "description": "payments valide la commande avant traitement"}),
 ]
 
 def query_prometheus(promql):
@@ -108,12 +123,14 @@ def write_features(conn, now, p50, p95, p99, rps, err5xx, err4xx):
             p99.get(key),
             err5xx.get(key, 0.0),
             err4xx.get(key, 0.0),
+            ep.get("service_tier"),
         )
 
         cur.execute("""
             INSERT INTO endpoint_features
-                (time, endpoint_id, service, rps, p50_ms, p95_ms, p99_ms, error_rate_5xx, error_rate_4xx)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                (time, endpoint_id, service, rps, p50_ms, p95_ms, p99_ms,
+                 error_rate_5xx, error_rate_4xx, service_tier)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, row)
 
         log.debug(
@@ -127,9 +144,26 @@ def write_features(conn, now, p50, p95, p99, rps, err5xx, err4xx):
     cur.close()
     log.info(f"Written {len(ENDPOINTS)} rows at {now}")
 
+def populate_relationships(conn):
+    """Insere la topologie d'appel dans endpoint_relationships (idempotent)."""
+    cur = conn.cursor()
+    for parent_id, child_id, parent_svc, child_svc, call_type, metadata in RELATIONSHIPS:
+        cur.execute("""
+            INSERT INTO endpoint_relationships
+                (parent_endpoint_id, child_endpoint_id,
+                 parent_service, child_service, call_type, metadata)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
+        """, (parent_id, child_id, parent_svc, child_svc, call_type, json.dumps(metadata)))
+    conn.commit()
+    cur.close()
+    log.info(f"endpoint_relationships peuplee ({len(RELATIONSHIPS)} aretes, idempotent)")
+
+
 def run():
     conn = psycopg2.connect(DB_URL)
     log.info("Connected to TimescaleDB")
+    populate_relationships(conn)
 
     while True:
         try:

@@ -83,7 +83,8 @@ def _get_recent_alert_history(cur, endpoint_id, now):
 def _get_current_alert(cur, endpoint_id, signal_type):
     """Recupere l'etat courant de l'alerte (deja en FIRING au moment de l'appel)."""
     cur.execute("""
-        SELECT severity, score, raw_value, layer, opened_at, suspected_fault, imputation_score
+        SELECT severity, score, raw_value, layer, opened_at, suspected_fault,
+               imputation_score, contributing_features
         FROM alerts
         WHERE endpoint_id = %s AND signal_type = %s
         LIMIT 1
@@ -92,13 +93,14 @@ def _get_current_alert(cur, endpoint_id, signal_type):
     if not row:
         return None
     return {
-        "severity":          row[0],
-        "score":             row[1],
-        "raw_value":         row[2],
-        "layer":             row[3],
-        "opened_at":         row[4].isoformat() if row[4] else None,
-        "suspected_fault":   row[5],
-        "imputation_score":  row[6],
+        "severity":               row[0],
+        "score":                  row[1],
+        "raw_value":              row[2],
+        "layer":                  row[3],
+        "opened_at":              row[4].isoformat() if row[4] else None,
+        "suspected_fault":        row[5],
+        "imputation_score":       row[6],
+        "contributing_features":  row[7],
     }
 
 
@@ -137,6 +139,10 @@ def build_context(cur, endpoint_id: str, signal_type: str, now: datetime) -> dic
 
     history = _get_recent_alert_history(cur, endpoint_id, now)
 
+    # Analyse du graphe de dependances : extraite de contributing_features si presente.
+    cf = alert.get("contributing_features") or {}
+    service_attribution = cf.get("service_attribution") if isinstance(cf, dict) else None
+
     context = {
         "endpoint_id":      endpoint_id,
         "signal_type":      signal_type,
@@ -155,6 +161,7 @@ def build_context(cur, endpoint_id: str, signal_type: str, now: datetime) -> dic
             "suspected_fault":  alert.get("suspected_fault"),
             "imputation_score": _clean(alert.get("imputation_score")),
         },
+        "service_attribution": service_attribution,
         "recent_history":   history,
     }
     return context
@@ -172,15 +179,40 @@ Contexte de l'alerte :
 Genere une explication structuree. Reponds UNIQUEMENT avec un objet JSON valide, sans texte avant ou apres, sans balises markdown, au format exact suivant :
 
 {{
-  "summary": "deux phrases maximum decrivant ce qui s'est degrade et de combien par rapport a la baseline attendue",
-  "suspected_cause": "cause probable formulee avec prudence -- si imputation_score est eleve (proche de 1.0) tu peux etre plus affirmatif, si bas ou absent reste prudent et dis que la cause n'est pas claire",
-  "checks": ["verification concrete 1", "verification concrete 2", "verification concrete 3 optionnelle"]
+  "summary": "deux phrases maximum : metrique degradee + chiffres cles (valeur observee, seuil SLO, ecart baseline)",
+  "suspected_cause": "analyse de cause en 2-3 phrases -- inclure l'analyse topologique si service_attribution est present, puis la cause probable avec le vocabulaire de l'incertitude",
+  "checks": ["action concrete 1", "action concrete 2", "action concrete 3 optionnelle"]
 }}
 
-Regles :
-- Ne jamais affirmer la cause avec certitude si imputation_score est null ou faible (< 0.5)
-- Mentionner les chiffres cles (valeur observee, seuil SLO, baseline) dans summary
-- Les checks doivent etre des actions concretes (ex: "verifier les logs du service X", "comparer avec le dernier deploiement"), pas des generalites
+Regles generales :
+- TOUJOURS utiliser "probable", "semble", "suspecte", "correle" -- ne jamais affirmer une cause avec certitude
+- Mentionner les chiffres cles (valeur observee, seuil SLO, baseline p50/p90) dans summary
+- Les checks doivent etre des actions concretes (ex: "verifier les logs du service orders"), pas des generalites
+
+Regles pour service_attribution (si present dans le contexte) :
+1. Si root_cause_candidates contient des entrees :
+   - Dans suspected_cause, commencer par l'analyse topologique :
+     "L'analyse de dependances indique que <endpoint_id> (<service>) est egalement en degradation
+     (score=<anomaly_score>). La degradation de l'endpoint courant est probablement liee a
+     cette anomalie en amont."
+   - call_type "direct" = appel proxy ; "cascade" = appel interne en cascade
+   - Calibrer le vocabulaire selon confidence (derive de confidence_score, distinct de anomaly_score) :
+       "high"   -> "vraisemblablement causee par" (direct + signal fort, confidence_score >= 0.65)
+       "medium" -> "semble liee a" ou "probablement" (evidence moderee, confidence_score >= 0.35)
+       "low"    -> "une correlation possible existe avec" (signal faible, < 0.35)
+   - confidence_score mesure la plausibilite du LIEN CAUSAL, pas l'intensite de l'anomalie.
+     Exemple : anomaly_score=0.95 cascade -> confidence_score=0.62 -> medium (pas high).
+   - Si confidence est absent, utiliser le vocabulaire "medium" par defaut.
+
+2. Si root_cause_candidates est vide mais children/parents sont presents :
+   - Les dependances directes sont saines ; la degradation est probablement locale.
+   - Formuler : "Les services dependants directs semblent sains. La cause semble locale a cet endpoint."
+
+3. Si service_attribution est absent ou null :
+   - Ne pas mentionner les dependances de service.
+
+4. Limite 1-hop : le contexte ne contient qu'un saut de dependance.
+   Ne pas speculer sur des causes au-dela de ce qui est dans root_cause_candidates.
 """
 
 
@@ -260,21 +292,75 @@ def _fallback_explanation(context: dict) -> dict:
     """Explication deterministe utilisee quand le LLM est indisponible ou invalide."""
     endpoint_id = context.get("endpoint_id", "unknown")
     signal_type = context.get("signal_type", "unknown")
-    observed = context.get("observed_value")
-    threshold = context.get("slo_threshold")
-    suspected = context.get("correlation", {}).get("suspected_fault")
+    observed   = context.get("observed_value")
+    threshold  = context.get("slo_threshold")
+    score      = context.get("score")
+    severity   = context.get("severity")
+    suspected  = context.get("correlation", {}).get("suspected_fault")
     imputation = context.get("correlation", {}).get("imputation_score")
+
+    score_part = f", score={score}" if score is not None else ""
+    sev_part   = f", severite={severity}" if severity else ""
 
     if observed is not None and threshold is not None:
         summary = (
             f"L'endpoint {endpoint_id} depasse le seuil SLO sur {signal_type} "
-            f"(observe={observed}, seuil={threshold})."
+            f"(observe={observed}, seuil={threshold}{score_part}{sev_part})."
         )
     else:
-        summary = f"L'endpoint {endpoint_id} a declenche une alerte sur {signal_type}."
+        summary = f"L'endpoint {endpoint_id} a declenche une alerte sur {signal_type}{score_part}."
 
-    if suspected and imputation and imputation >= 0.5:
+    # Priorite 1 : attribution par propagation de service (si disponible dans le contexte).
+    # Permet de produire une cause utile meme sans LLM, quand un enfant est degrade.
+    service_attr = context.get("service_attribution") or {}
+    candidates   = service_attr.get("root_cause_candidates") or []
+    if candidates:
+        best           = candidates[0]
+        child_ep       = best.get("endpoint_id", "inconnu")
+        child_svc      = best.get("service", "inconnu")
+        cand_score     = best.get("anomaly_score")
+        score_str      = f", score={cand_score:.2f}" if cand_score is not None else ""
+        conf_score     = best.get("confidence_score")
+        cs_str         = f", confiance={conf_score:.2f}" if conf_score is not None else ""
+        call_type_desc = {
+            "direct":  "appel direct",
+            "cascade": "appel en cascade",
+        }.get(best.get("call_type", ""), "dependance")
+        confidence = best.get("confidence")
+
+        if confidence == "high":
+            cause = (
+                f"La degradation de {endpoint_id} est vraisemblablement causee par "
+                f"une anomalie sur {child_ep} ({child_svc}, {call_type_desc}{cs_str}{score_str}). "
+                f"Co-degradation correlee dans la fenetre de detection -- "
+                f"causalite suspectee, confirmation manuelle recommandee."
+            )
+        elif confidence == "medium":
+            cause = (
+                f"La degradation de {endpoint_id} semble liee a une anomalie sur "
+                f"{child_ep} ({child_svc}, {call_type_desc}{cs_str}{score_str}). "
+                f"Co-degradation observee dans la fenetre de detection -- "
+                f"causalite non demontree."
+            )
+        elif confidence == "low":
+            cause = (
+                f"Une correlation possible a ete detectee avec {child_ep} "
+                f"({child_svc}, {call_type_desc}{score_str}). "
+                f"Signal de degradation faible -- investigation requise avant de conclure."
+            )
+        else:
+            # Legacy : candidat sans champ confidence (donnees anterieures a cette version)
+            cause = (
+                f"Propagation suspecte depuis {child_ep} "
+                f"({child_svc}, {call_type_desc}{score_str}). "
+                f"Cet endpoint enfant est egalement en degradation, ce qui pourrait expliquer "
+                f"la degradation de {endpoint_id}. "
+                f"Cause definitive non confirmee -- investigation manuelle recommandee."
+            )
+    # Priorite 2 : correlation injection/deploiement (comportement existant).
+    elif suspected and imputation and imputation >= 0.5:
         cause = f"Cause probable (score {imputation}): {suspected}."
+    # Priorite 3 : aucune information causale disponible.
     else:
         cause = "Cause non determinee automatiquement -- aucune correlation forte avec une injection ou un deploiement connu."
 
