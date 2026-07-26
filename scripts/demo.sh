@@ -61,6 +61,9 @@ export const options = { vus: 15, duration: '12m' };
 export default function () {
   http.get(`${__ENV.BASE_URL}/api/orders/1`);
   http.get(`${__ENV.BASE_URL}/api/orders`);
+  http.post(`${__ENV.BASE_URL}/api/payments`,
+    JSON.stringify({ order_id: 1 }),
+    { headers: { 'Content-Type': 'application/json' } });
   sleep(0.3 + Math.random() * 0.3);
 }
 JS
