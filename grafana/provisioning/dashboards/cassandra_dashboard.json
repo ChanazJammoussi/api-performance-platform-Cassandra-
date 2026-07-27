@@ -213,11 +213,11 @@
               },
               {
                 "color": "orange",
-                "value": 0.1
+                "value": 10
               }
             ]
           },
-          "unit": "percentunit"
+          "unit": "percent"
         },
         "overrides": []
       },
@@ -249,7 +249,7 @@
             "uid": "DS_TIMESCALEDB"
           },
           "rawQuery": true,
-          "rawSql": "SELECT time, error_rate_5xx AS value FROM endpoint_features WHERE endpoint_id = '$endpoint' AND time >= $__timeFrom() ORDER BY time DESC LIMIT 1",
+          "rawSql": "SELECT time, error_rate_5xx AS value FROM endpoint_features WHERE endpoint_id = '$endpoint' AND time >= $__timeFrom() AND error_rate_5xx IS NOT NULL ORDER BY time DESC LIMIT 1",
           "format": "time_series"
         }
       ]
@@ -653,7 +653,7 @@
               "mode": "none"
             }
           },
-          "unit": "percentunit",
+          "unit": "percent",
           "min": 0
         },
         "overrides": [
@@ -1704,14 +1704,14 @@
           "type": "postgres",
           "uid": "DS_TIMESCALEDB"
         },
-        "definition": "SELECT DISTINCT endpoint_id FROM endpoint_features ORDER BY endpoint_id",
+        "definition": "SELECT DISTINCT endpoint_id FROM (SELECT parent_endpoint_id AS endpoint_id FROM endpoint_relationships UNION SELECT child_endpoint_id FROM endpoint_relationships) e ORDER BY endpoint_id",
         "hide": 0,
         "includeAll": false,
         "label": "Endpoint",
         "multi": false,
         "name": "endpoint",
         "options": [],
-        "query": "SELECT DISTINCT endpoint_id FROM endpoint_features ORDER BY endpoint_id",
+        "query": "SELECT DISTINCT endpoint_id FROM (SELECT parent_endpoint_id AS endpoint_id FROM endpoint_relationships UNION SELECT child_endpoint_id FROM endpoint_relationships) e ORDER BY endpoint_id",
         "refresh": 2,
         "regex": "",
         "sort": 1,

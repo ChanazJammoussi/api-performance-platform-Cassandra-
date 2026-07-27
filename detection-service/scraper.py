@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import time
 import logging
@@ -108,19 +109,29 @@ def fetch_features():
 def write_features(conn, now, p50, p95, p99, rps, err5xx, err4xx):
     """Ecrit une ligne dans endpoint_features pour chaque endpoint."""
     cur = conn.cursor()
+    written = 0
     for ep in ENDPOINTS:
         service = ep["service"]
         route = ep["route"]
         key = (service, route)
 
+        endpoint_id = f"{ep['method']} {route}"
+        p99_val = p99.get(key)
+        if p99_val is None or not math.isfinite(p99_val):
+            log.debug(
+                "Skipping endpoint %s: no valid latency metric available",
+                endpoint_id
+            )
+            continue
+
         row = (
             now,
-            f"{ep['method']} {route}",
+            endpoint_id,
             service,
             rps.get(key),
             p50.get(key),
             p95.get(key),
-            p99.get(key),
+            p99_val,
             err5xx.get(key, 0.0),
             err4xx.get(key, 0.0),
             ep.get("service_tier"),
@@ -136,13 +147,19 @@ def write_features(conn, now, p50, p95, p99, rps, err5xx, err4xx):
         log.debug(
             f"{ep['method']} {route:<30s} "
             f"rps={rps.get(key, 0):.2f}  "
-            f"p99={p99.get(key, float('nan')):.0f}ms  "
+            f"p99={p99_val:.0f}ms  "
             f"err5xx={err5xx.get(key, 0):.1f}%"
         )
+        written += 1
 
     conn.commit()
     cur.close()
-    log.info(f"Written {len(ENDPOINTS)} rows at {now}")
+    log.info(f"Written {written}/{len(ENDPOINTS)} endpoints at {now}")
+    if written == 0:
+        log.warning(
+            "No endpoint features written this cycle -- "
+            "normal during warmup or possible Prometheus/OTel collection issue"
+        )
 
 def populate_relationships(conn):
     """Insere la topologie d'appel dans endpoint_relationships (idempotent)."""
