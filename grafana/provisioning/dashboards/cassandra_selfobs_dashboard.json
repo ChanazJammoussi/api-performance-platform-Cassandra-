@@ -272,8 +272,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
-          "expr": "up{job=\"otel-collector\"}",
-          "instant": true,
+          "expr": "min_over_time(up{job=\"otel-collector\"}[2m])",
           "refId": "A"
         }
       ]
