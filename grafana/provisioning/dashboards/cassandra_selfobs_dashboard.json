@@ -7,7 +7,7 @@
     "sre"
   ],
   "schemaVersion": 39,
-  "version": 1,
+  "version": 5,
   "time": {
     "from": "now-6h",
     "to": "now"
@@ -17,10 +17,7 @@
     "list": [
       {
         "builtIn": 1,
-        "datasource": {
-          "type": "grafana",
-          "uid": "-- Grafana --"
-        },
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
         "enable": true,
         "hide": true,
         "name": "Annotations & Alerts",
@@ -28,84 +25,301 @@
       }
     ]
   },
-  "templating": {
-    "list": []
-  },
+  "templating": { "list": [] },
   "panels": [
+
     {
       "type": "row",
-      "title": "Fraicheur & cadence du pipeline",
+      "title": "Cassandra Status",
       "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 0
-      },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
       "id": 1,
       "panels": []
     },
     {
       "type": "stat",
-      "title": "Fraicheur scraper (s)",
-      "datasource": {
-        "type": "postgres",
-        "uid": "DS_TIMESCALEDB"
-      },
-      "description": "Age de la derniere ligne endpoint_features. Rouge > 300s = scraper en retard (lag alert).",
+      "title": "Detector",
+      "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
+      "description": "Vert si le dernier cycle de detection date de moins de 300s.",
       "fieldConfig": {
         "defaults": {
-          "unit": "s",
-          "color": {
-            "mode": "thresholds"
-          },
+          "unit": "short",
+          "noValue": "NO DATA",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": { "text": "OK",    "color": "green", "index": 0 },
+                "0": { "text": "STALE", "color": "red",   "index": 1 }
+              }
+            }
+          ],
+          "color": { "mode": "thresholds" },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 120
-              },
-              {
-                "color": "red",
-                "value": 300
-              }
+              { "color": "red",   "value": null },
+              { "color": "green", "value": 1    }
             ]
           }
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 5,
-        "w": 5,
-        "x": 0,
-        "y": 1
-      },
+      "gridPos": { "h": 5, "w": 5, "x": 0, "y": 1 },
       "id": 2,
       "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
+        "textMode": "value",
+        "colorMode": "background",
         "graphMode": "none",
-        "justifyMode": "auto"
+        "justifyMode": "center"
       },
       "targets": [
         {
-          "datasource": {
-            "type": "postgres",
-            "uid": "DS_TIMESCALEDB"
-          },
+          "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
+          "rawQuery": true,
+          "rawSql": "SELECT now() AS time, CASE WHEN COALESCE(EXTRACT(EPOCH FROM (now()-max(detected_at))), 9999) < 300 THEN 1 ELSE 0 END AS value FROM anomalies",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Scraper",
+      "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
+      "description": "Vert si la derniere ligne endpoint_features date de moins de 300s.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "NO DATA",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": { "text": "OK",    "color": "green", "index": 0 },
+                "0": { "text": "STALE", "color": "red",   "index": 1 }
+              }
+            }
+          ],
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red",   "value": null },
+              { "color": "green", "value": 1    }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 5, "w": 5, "x": 5, "y": 1 },
+      "id": 3,
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
+          "rawQuery": true,
+          "rawSql": "SELECT now() AS time, CASE WHEN COALESCE(EXTRACT(EPOCH FROM (now()-max(time))), 9999) < 300 THEN 1 ELSE 0 END AS value FROM endpoint_features",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Prometheus",
+      "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
+      "description": "Vert si Prometheus repond. Utilise un vecteur scalaire toujours egal a 1.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "DOWN",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": { "text": "OK", "color": "green", "index": 0 }
+              }
+            }
+          ],
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red",   "value": null },
+              { "color": "green", "value": 1    }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 5, "w": 5, "x": 10, "y": 1 },
+      "id": 4,
+      "options": {
+        "reduceOptions": { "calcs": ["last"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
+          "expr": "vector(1)",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Database",
+      "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
+      "description": "Vert si TimescaleDB repond. Requete de connectivite minimale.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "DOWN",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": { "text": "OK", "color": "green", "index": 0 }
+              }
+            }
+          ],
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red",   "value": null },
+              { "color": "green", "value": 1    }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 5, "w": 5, "x": 15, "y": 1 },
+      "id": 5,
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
+          "rawQuery": true,
+          "rawSql": "SELECT now() AS time, 1 AS value",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ]
+    },
+
+    {
+      "type": "stat",
+      "title": "OpenTelemetry Collector",
+      "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
+      "description": "Vert si Prometheus scrape avec succes le collector (job=otel-collector, port 8888).",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "DOWN",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": { "text": "OK",   "color": "green", "index": 0 },
+                "0": { "text": "DOWN", "color": "red",   "index": 1 }
+              }
+            }
+          ],
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red",   "value": null },
+              { "color": "green", "value": 1    }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 5, "w": 4, "x": 20, "y": 1 },
+      "id": 26,
+      "options": {
+        "reduceOptions": { "calcs": ["last"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
+          "expr": "up{job=\"otel-collector\"}",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+
+    {
+      "type": "row",
+      "title": "Etat du pipeline en temps reel",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 },
+      "id": 6,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Fraicheur scraper (s)",
+      "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
+      "description": "Age de la derniere ligne endpoint_features. Rouge > 300s = scraper en retard.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 120 },
+              { "color": "red",    "value": 300 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 7 },
+      "id": 7,
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
           "rawQuery": true,
           "rawSql": "SELECT now() AS time, EXTRACT(EPOCH FROM (now()-max(time)))::int AS value FROM endpoint_features",
           "format": "time_series",
@@ -116,64 +330,36 @@
     {
       "type": "stat",
       "title": "Dernier cycle detecteur (s)",
-      "datasource": {
-        "type": "postgres",
-        "uid": "DS_TIMESCALEDB"
-      },
+      "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
       "description": "Age de la derniere ecriture dans l'anomaly store.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
-          "color": {
-            "mode": "thresholds"
-          },
+          "color": { "mode": "thresholds" },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 120
-              },
-              {
-                "color": "red",
-                "value": 300
-              }
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 120 },
+              { "color": "red",    "value": 300 }
             ]
           }
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 5,
-        "w": 5,
-        "x": 5,
-        "y": 1
-      },
-      "id": 3,
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 7 },
+      "id": 8,
       "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "orientation": "auto",
         "textMode": "auto",
-        "colorMode": "value",
+        "colorMode": "background",
         "graphMode": "none",
-        "justifyMode": "auto"
+        "justifyMode": "center"
       },
       "targets": [
         {
-          "datasource": {
-            "type": "postgres",
-            "uid": "DS_TIMESCALEDB"
-          },
+          "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
           "rawQuery": true,
           "rawSql": "SELECT now() AS time, EXTRACT(EPOCH FROM (now()-max(detected_at)))::int AS value FROM anomalies",
           "format": "time_series",
@@ -184,64 +370,36 @@
     {
       "type": "stat",
       "title": "Alertes FIRING actives",
-      "datasource": {
-        "type": "postgres",
-        "uid": "DS_TIMESCALEDB"
-      },
-      "description": "",
+      "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
+      "description": "Nombre d'alertes actuellement en etat firing.",
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "color": {
-            "mode": "thresholds"
-          },
+          "color": { "mode": "thresholds" },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 1
-              },
-              {
-                "color": "red",
-                "value": 5
-              }
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 1    },
+              { "color": "red",    "value": 5    }
             ]
           }
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 5,
-        "w": 4,
-        "x": 10,
-        "y": 1
-      },
-      "id": 4,
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 7 },
+      "id": 9,
       "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "orientation": "auto",
         "textMode": "auto",
-        "colorMode": "value",
+        "colorMode": "background",
         "graphMode": "none",
-        "justifyMode": "auto"
+        "justifyMode": "center"
       },
       "targets": [
         {
-          "datasource": {
-            "type": "postgres",
-            "uid": "DS_TIMESCALEDB"
-          },
+          "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
           "rawQuery": true,
           "rawSql": "SELECT now() AS time, count(*) AS value FROM alerts WHERE state='firing'",
           "format": "time_series",
@@ -251,59 +409,37 @@
     },
     {
       "type": "stat",
-      "title": "Transitions FIRING 24h",
-      "datasource": {
-        "type": "postgres",
-        "uid": "DS_TIMESCALEDB"
-      },
-      "description": "",
+      "title": "Transitions FIRING",
+      "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
+      "description": "Nombre de transitions vers FIRING dans la fenetre Grafana selectionnee.",
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "color": {
-            "mode": "thresholds"
-          },
+          "color": { "mode": "thresholds" },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
+              { "color": "blue", "value": null }
             ]
           }
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 5,
-        "w": 4,
-        "x": 14,
-        "y": 1
-      },
-      "id": 5,
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 7 },
+      "id": 10,
       "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "orientation": "auto",
         "textMode": "auto",
-        "colorMode": "value",
+        "colorMode": "background",
         "graphMode": "none",
-        "justifyMode": "auto"
+        "justifyMode": "center"
       },
       "targets": [
         {
-          "datasource": {
-            "type": "postgres",
-            "uid": "DS_TIMESCALEDB"
-          },
+          "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
           "rawQuery": true,
-          "rawSql": "SELECT now() AS time, count(*) AS value FROM alerts_history WHERE fired_at > now()-interval '24 hours'",
+          "rawSql": "SELECT now() AS time, count(*) AS value FROM alerts_history WHERE $__timeFilter(fired_at)",
           "format": "time_series",
           "refId": "A"
         }
@@ -312,64 +448,36 @@
     {
       "type": "stat",
       "title": "Taux fallback LLM (%)",
-      "datasource": {
-        "type": "postgres",
-        "uid": "DS_TIMESCALEDB"
-      },
-      "description": "Part des explications retombees sur le template deterministe (LLM indispo/invalide).",
+      "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
+      "description": "Part des explications retombees sur le template deterministe.",
       "fieldConfig": {
         "defaults": {
           "unit": "percent",
-          "color": {
-            "mode": "thresholds"
-          },
+          "color": { "mode": "thresholds" },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 25
-              },
-              {
-                "color": "red",
-                "value": 75
-              }
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 25   },
+              { "color": "red",    "value": 75   }
             ]
           }
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 5,
-        "w": 6,
-        "x": 18,
-        "y": 1
-      },
-      "id": 6,
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 7 },
+      "id": 11,
       "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "orientation": "auto",
         "textMode": "auto",
-        "colorMode": "value",
+        "colorMode": "background",
         "graphMode": "none",
-        "justifyMode": "auto"
+        "justifyMode": "center"
       },
       "targets": [
         {
-          "datasource": {
-            "type": "postgres",
-            "uid": "DS_TIMESCALEDB"
-          },
+          "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
           "rawQuery": true,
           "rawSql": "SELECT now() AS time, round(100.0*count(*) FILTER (WHERE (explanation->>'fallback')::boolean) / NULLIF(count(*) FILTER (WHERE explanation IS NOT NULL),0),0) AS value FROM alerts",
           "format": "time_series",
@@ -378,19 +486,52 @@
       ]
     },
     {
-      "type": "timeseries",
-      "title": "Cadence detecteur -- ecart entre cycles (s)",
-      "datasource": {
-        "type": "postgres",
-        "uid": "DS_TIMESCALEDB"
-      },
-      "description": "Doit rester proche de 60s (cadence de detection).",
+      "type": "stat",
+      "title": "Duree FIRING mediane (s)",
+      "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
+      "description": "Duree mediane des episodes FIRING (resolved_at - opened_at).",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
-          "color": {
-            "mode": "palette-classic"
-          },
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": null }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 7 },
+      "id": 12,
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
+          "rawQuery": true,
+          "rawSql": "SELECT now() AS time, EXTRACT(EPOCH FROM percentile_cont(0.5) WITHIN GROUP (ORDER BY (resolved_at-opened_at))) AS value FROM alerts WHERE resolved_at IS NOT NULL AND opened_at IS NOT NULL",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Cadence detecteur -- ecart entre cycles (s)",
+      "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
+      "description": "Doit rester proche de 60s. Un ecart prolonge indique un blocage du cycle.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": { "mode": "palette-classic" },
           "custom": {
             "drawStyle": "line",
             "fillOpacity": 10,
@@ -401,35 +542,20 @@
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 6
-      },
-      "id": 7,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 11 },
+      "id": 13,
       "options": {
         "legend": {
-          "calcs": [
-            "mean",
-            "max",
-            "last"
-          ],
+          "calcs": ["mean", "max", "last"],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
         },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
+        "tooltip": { "mode": "multi", "sort": "none" }
       },
       "targets": [
         {
-          "datasource": {
-            "type": "postgres",
-            "uid": "DS_TIMESCALEDB"
-          },
+          "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
           "rawQuery": true,
           "rawSql": "SELECT t AS time, EXTRACT(EPOCH FROM (t - lag(t) OVER (ORDER BY t))) AS ecart_s FROM (SELECT DISTINCT detected_at AS t FROM anomalies WHERE $__timeFilter(detected_at)) s ORDER BY t",
           "format": "time_series",
@@ -440,17 +566,12 @@
     {
       "type": "timeseries",
       "title": "Cadence scraper -- ecart entre cycles (s)",
-      "datasource": {
-        "type": "postgres",
-        "uid": "DS_TIMESCALEDB"
-      },
-      "description": "Doit rester proche de 60s (cadence de scrape).",
+      "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
+      "description": "Doit rester proche de 60s.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
-          "color": {
-            "mode": "palette-classic"
-          },
+          "color": { "mode": "palette-classic" },
           "custom": {
             "drawStyle": "line",
             "fillOpacity": 10,
@@ -461,35 +582,20 @@
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 6
-      },
-      "id": 8,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 11 },
+      "id": 14,
       "options": {
         "legend": {
-          "calcs": [
-            "mean",
-            "max",
-            "last"
-          ],
+          "calcs": ["mean", "max", "last"],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
         },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
+        "tooltip": { "mode": "multi", "sort": "none" }
       },
       "targets": [
         {
-          "datasource": {
-            "type": "postgres",
-            "uid": "DS_TIMESCALEDB"
-          },
+          "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
           "rawQuery": true,
           "rawSql": "SELECT t AS time, EXTRACT(EPOCH FROM (t - lag(t) OVER (ORDER BY t))) AS ecart_s FROM (SELECT DISTINCT time AS t FROM endpoint_features WHERE $__timeFilter(time)) s ORDER BY t",
           "format": "time_series",
@@ -497,110 +603,31 @@
         }
       ]
     },
+
     {
       "type": "row",
-      "title": "Qualite d'alerte",
+      "title": "Alertes recentes",
       "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 14
-      },
-      "id": 9,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 19 },
+      "id": 15,
       "panels": []
-    },
-    {
-      "type": "stat",
-      "title": "Duree FIRING mediane (s)",
-      "datasource": {
-        "type": "postgres",
-        "uid": "DS_TIMESCALEDB"
-      },
-      "description": "",
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 5,
-        "w": 6,
-        "x": 0,
-        "y": 1
-      },
-      "id": 10,
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "postgres",
-            "uid": "DS_TIMESCALEDB"
-          },
-          "rawQuery": true,
-          "rawSql": "SELECT now() AS time, EXTRACT(EPOCH FROM percentile_cont(0.5) WITHIN GROUP (ORDER BY (resolved_at-opened_at))) AS value FROM alerts WHERE resolved_at IS NOT NULL AND opened_at IS NOT NULL",
-          "format": "time_series",
-          "refId": "A"
-        }
-      ]
     },
     {
       "type": "table",
       "title": "Historique des transitions FIRING (avec couche)",
-      "datasource": {
-        "type": "postgres",
-        "uid": "DS_TIMESCALEDB"
-      },
+      "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
       "fieldConfig": {
         "defaults": {
-          "custom": {
-            "align": "auto"
-          }
+          "custom": { "align": "auto" }
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 9,
-        "w": 18,
-        "x": 6,
-        "y": 15
-      },
-      "id": 11,
-      "options": {
-        "showHeader": true
-      },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 20 },
+      "id": 16,
+      "options": { "showHeader": true },
       "targets": [
         {
-          "datasource": {
-            "type": "postgres",
-            "uid": "DS_TIMESCALEDB"
-          },
+          "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
           "rawQuery": true,
           "format": "table",
           "refId": "A",
@@ -608,297 +635,155 @@
         }
       ]
     },
+
     {
       "type": "row",
-      "title": "Sante du modele ML (drift)",
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 24
-      },
-      "id": 12,
-      "panels": []
-    },
-    {
-      "type": "stat",
-      "title": "Drift ML (KS)",
-      "datasource": {
-        "type": "postgres",
-        "uid": "DS_TIMESCALEDB"
-      },
-      "description": "Statistique KS entre la distribution des scores ML live et la reference d'entrainement. Rouge >= 0.30 = drift.",
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 0.3
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 6,
-        "x": 0,
-        "y": 25
-      },
-      "id": 13,
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "targets": [
+      "title": "Sante du modele ML",
+      "collapsed": true,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 30 },
+      "id": 17,
+      "panels": [
         {
-          "datasource": {
-            "type": "postgres",
-            "uid": "DS_TIMESCALEDB"
+          "type": "stat",
+          "title": "Etat du modele ML",
+          "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
+          "description": "Vert = drift KS < 0.30 (distribution stable). Orange = drift detecte, reentrainement requis.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "noValue": "Non entraine",
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "0": { "text": "Drift normal",   "color": "green",  "index": 0 },
+                    "1": { "text": "Drift detecte",  "color": "orange", "index": 1 }
+                  }
+                }
+              ],
+              "color": { "mode": "thresholds" },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green",  "value": null },
+                  { "color": "orange", "value": 1    }
+                ]
+              }
+            },
+            "overrides": []
           },
-          "rawQuery": true,
-          "rawSql": "SELECT now() AS time, ks_drift AS value FROM model_health ORDER BY checked_at DESC LIMIT 1",
-          "format": "time_series",
-          "refId": "A"
+          "gridPos": { "h": 6, "w": 12, "x": 0, "y": 31 },
+          "id": 18,
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+            "orientation": "auto",
+            "textMode": "value",
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "center"
+          },
+          "targets": [
+            {
+              "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
+              "rawQuery": true,
+              "rawSql": "SELECT now() AS time, CASE WHEN COALESCE(ks_drift, 0) >= 0.3 THEN 1 ELSE 0 END AS value FROM model_health ORDER BY checked_at DESC LIMIT 1",
+              "format": "time_series",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Historique du drift",
+          "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
+          "description": "Courbe KS dans le temps. La ligne rouge a 0.30 est le seuil de reentrainement.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": { "mode": "fixed", "fixedColor": "blue" },
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 15,
+                "lineWidth": 2,
+                "showPoints": "auto",
+                "spanNulls": true,
+                "thresholdsStyle": { "mode": "line" }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "transparent", "value": null },
+                  { "color": "red",         "value": 0.3  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 6, "w": 12, "x": 12, "y": 31 },
+          "id": 20,
+          "options": {
+            "legend": {
+              "calcs": ["last", "max"],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": { "mode": "single", "sort": "none" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "postgres", "uid": "DS_TIMESCALEDB" },
+              "rawQuery": true,
+              "format": "time_series",
+              "refId": "A",
+              "rawSql": "SELECT checked_at AS time, ks_drift AS \"Drift KS\" FROM model_health WHERE $__timeFilter(checked_at) ORDER BY checked_at"
+            }
+          ]
         }
       ]
     },
-    {
-      "type": "stat",
-      "title": "Taux anomalie live",
-      "datasource": {
-        "type": "postgres",
-        "uid": "DS_TIMESCALEDB"
-      },
-      "description": "Fraction des scores ML live >= 0.5. A comparer a la contamination d'entrainement (~2%).",
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 0.1
-              },
-              {
-                "color": "red",
-                "value": 0.25
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 6,
-        "x": 6,
-        "y": 25
-      },
-      "id": 14,
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "postgres",
-            "uid": "DS_TIMESCALEDB"
-          },
-          "rawQuery": true,
-          "rawSql": "SELECT now() AS time, live_anomaly_rate AS value FROM model_health ORDER BY checked_at DESC LIMIT 1",
-          "format": "time_series",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "title": "Drift ML (KS) dans le temps",
-      "datasource": {
-        "type": "postgres",
-        "uid": "DS_TIMESCALEDB"
-      },
-      "description": "Evolution du KS de drift. Franchir 0.30 declenche un reentrainement (audit #10/#13).",
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "auto",
-            "spanNulls": true
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 0.3
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 12,
-        "x": 12,
-        "y": 25
-      },
-      "id": 15,
-      "options": {
-        "legend": {
-          "calcs": [
-            "last",
-            "max"
-          ],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "postgres",
-            "uid": "DS_TIMESCALEDB"
-          },
-          "rawQuery": true,
-          "format": "time_series",
-          "refId": "A",
-          "rawSql": "SELECT checked_at AS time, ks_drift AS \"KS drift\" FROM model_health WHERE $__timeFilter(checked_at) ORDER BY checked_at"
-        }
-      ]
-    },
+
     {
       "type": "row",
       "title": "Runtime detecteur (metriques Prometheus natives)",
       "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 31
-      },
-      "id": 16,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 },
+      "id": 21,
       "panels": []
     },
     {
       "type": "stat",
-      "title": "Duree de cycle p95 (s)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "DS_PROMETHEUS"
-      },
+      "title": "Duree de cycle p95",
+      "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
       "description": "95e percentile de la duree d'un cycle de detection (budget cadence 60s).",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
-          "color": {
-            "mode": "thresholds"
-          },
+          "color": { "mode": "thresholds" },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 5
-              },
-              {
-                "color": "red",
-                "value": 30
-              }
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 5    },
+              { "color": "red",    "value": 30   }
             ]
           }
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 6,
-        "w": 6,
-        "x": 0,
-        "y": 32
-      },
-      "id": 17,
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 32 },
+      "id": 22,
       "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "orientation": "auto",
         "textMode": "auto",
-        "colorMode": "value",
+        "colorMode": "background",
         "graphMode": "area",
-        "justifyMode": "auto"
+        "justifyMode": "center"
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
-          },
+          "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
           "expr": "histogram_quantile(0.95, sum(rate(cassandra_detector_cycle_seconds_bucket[5m])) by (le))",
           "refId": "A"
         }
@@ -907,56 +792,34 @@
     {
       "type": "stat",
       "title": "Endpoints scores",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "DS_PROMETHEUS"
-      },
+      "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
       "description": "Endpoints scores au dernier cycle.",
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "color": {
-            "mode": "thresholds"
-          },
+          "color": { "mode": "thresholds" },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
+              { "color": "blue", "value": null }
             ]
           }
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 6,
-        "w": 6,
-        "x": 6,
-        "y": 32
-      },
-      "id": 18,
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 32 },
+      "id": 23,
       "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "orientation": "auto",
         "textMode": "auto",
-        "colorMode": "value",
+        "colorMode": "background",
         "graphMode": "area",
-        "justifyMode": "auto"
+        "justifyMode": "center"
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
-          },
+          "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
           "expr": "cassandra_detector_endpoints_scored",
           "refId": "A"
         }
@@ -965,17 +828,12 @@
     {
       "type": "timeseries",
       "title": "Alertes par etat",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "DS_PROMETHEUS"
-      },
+      "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
       "description": "Nombre d'alertes par etat (ok/pending/firing/resolving).",
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "color": {
-            "mode": "palette-classic"
-          },
+          "color": { "mode": "palette-classic" },
           "custom": {
             "drawStyle": "line",
             "fillOpacity": 10,
@@ -984,36 +842,39 @@
             "spanNulls": true
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "ok" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "pending" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "firing" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "resolving" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }]
+          }
+        ]
       },
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 38
-      },
-      "id": 19,
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 32 },
+      "id": 24,
       "options": {
         "legend": {
-          "calcs": [
-            "last",
-            "max"
-          ],
+          "calcs": ["last", "max"],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
         },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
+        "tooltip": { "mode": "multi", "sort": "none" }
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
-          },
+          "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
           "expr": "cassandra_detector_alerts",
           "legendFormat": "{{state}}",
           "refId": "A"
@@ -1023,17 +884,12 @@
     {
       "type": "timeseries",
       "title": "Appels LLM (rate/min) + erreurs de cycle",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "DS_PROMETHEUS"
-      },
+      "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
       "description": "Taux d'appels LLM par resultat (llm/fallback/error).",
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "color": {
-            "mode": "palette-classic"
-          },
+          "color": { "mode": "palette-classic" },
           "custom": {
             "drawStyle": "line",
             "fillOpacity": 10,
@@ -1044,39 +900,26 @@
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 38
-      },
-      "id": 20,
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 38 },
+      "id": 25,
       "options": {
         "legend": {
-          "calcs": [
-            "last",
-            "max"
-          ],
+          "calcs": ["last", "max"],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
         },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
+        "tooltip": { "mode": "multi", "sort": "none" }
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "DS_PROMETHEUS"
-          },
+          "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
           "expr": "60 * rate(cassandra_llm_calls_total[15m])",
           "legendFormat": "{{result}}",
           "refId": "A"
         }
       ]
     }
+
   ]
 }
