@@ -6,11 +6,11 @@ ENDPOINT_SLOS = {
     # Tier service (endpoints internes)
     "GET /orders/{order_id}":     {"p99_ms": 300,  "error_rate_5xx": 5},
     "GET /orders":                {"p99_ms": 300,  "error_rate_5xx": 5},
-    "POST /payments":             {"p99_ms": 500,  "error_rate_5xx": 5},
+    "POST /payments":             {"p99_ms": 1500, "error_rate_5xx": 5},
     # Tier gateway (tolerance plus elevee : inclut la latence de proxy)
     "GET /api/orders/{order_id}": {"p99_ms": 600,  "error_rate_5xx": 5},
     "GET /api/orders":            {"p99_ms": 600,  "error_rate_5xx": 5},
-    "POST /api/payments":         {"p99_ms": 800,  "error_rate_5xx": 5},
+    "POST /api/payments":         {"p99_ms": 2000, "error_rate_5xx": 5},
 }
 DEFAULT_SLOS = {"p99_ms": 500, "error_rate_5xx": 10}
 

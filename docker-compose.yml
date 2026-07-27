@@ -12,6 +12,12 @@ services:
     volumes:
       - timescaledb_data:/var/lib/postgresql/data
       - ./timescaledb/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cassandra -d cassandra"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   prometheus:
     image: prom/prometheus:v2.52.0
@@ -25,7 +31,8 @@ services:
     ports:
       - "9090:9090"
     depends_on:
-      - timescaledb
+      timescaledb:
+        condition: service_started
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.102.0
@@ -38,8 +45,10 @@ services:
       - "4318:4318"
       - "8888:8888"
     depends_on:
-      - timescaledb
-      - prometheus
+      timescaledb:
+        condition: service_started
+      prometheus:
+        condition: service_started
 
   grafana:
     image: grafana/grafana:10.4.0
@@ -53,7 +62,8 @@ services:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning
     depends_on:
-      - prometheus
+      prometheus:
+        condition: service_started
 
   orders:
     build: ./services/orders
@@ -61,8 +71,10 @@ services:
     ports:
       - "8001:8001"
     depends_on:
-      - otel-collector
-      - timescaledb
+      timescaledb:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
     environment:
       - DATABASE_URL=postgresql://cassandra:cassandra@timescaledb:5432/cassandra
 
@@ -72,8 +84,10 @@ services:
     ports:
       - "8002:8002"
     depends_on:
-      - otel-collector
-      - orders
+      otel-collector:
+        condition: service_started
+      orders:
+        condition: service_started
     environment:
       - ORDERS_URL=http://orders:8001
 
@@ -83,9 +97,12 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      - otel-collector
-      - orders
-      - payments
+      otel-collector:
+        condition: service_started
+      orders:
+        condition: service_started
+      payments:
+        condition: service_started
     environment:
       - ORDERS_URL=http://orders:8001
       - PAYMENTS_URL=http://payments:8002
@@ -96,8 +113,10 @@ services:
     container_name: cassandra-scraper
     command: ["python", "-u", "scraper.py"]
     depends_on:
-      - timescaledb
-      - prometheus
+      timescaledb:
+        condition: service_healthy
+      prometheus:
+        condition: service_started
     environment:
       - DATABASE_URL=postgresql://cassandra:cassandra@timescaledb:5432/cassandra
       - PROMETHEUS_URL=http://prometheus:9090
@@ -107,7 +126,8 @@ services:
     container_name: cassandra-detector
     command: ["python", "-u", "detector.py"]
     depends_on:
-      - timescaledb
+      timescaledb:
+        condition: service_healthy
     environment:
       - DATABASE_URL=postgresql://cassandra:cassandra@timescaledb:5432/cassandra
       - GROUND_TRUTH_DIR=/data/results
@@ -126,7 +146,8 @@ services:
     container_name: cassandra-baseline
     command: ["python", "-u", "baseline_job.py", "--loop", "--interval", "3600"]
     depends_on:
-      - timescaledb
+      timescaledb:
+        condition: service_healthy
     environment:
       - DATABASE_URL=postgresql://cassandra:cassandra@timescaledb:5432/cassandra
       - GROUND_TRUTH_DIR=/data/results
@@ -141,7 +162,8 @@ services:
     container_name: cassandra-model-monitor
     command: ["python", "-u", "model_monitor.py", "--loop", "--interval", "1800"]
     depends_on:
-      - timescaledb
+      timescaledb:
+        condition: service_healthy
     environment:
       - DATABASE_URL=postgresql://cassandra:cassandra@timescaledb:5432/cassandra
       - MODEL_DIR=/app/models
@@ -155,7 +177,8 @@ services:
     ports:
       - "8090:8090"
     depends_on:
-      - timescaledb
+      timescaledb:
+        condition: service_healthy
     environment:
       - DATABASE_URL=postgresql://cassandra:cassandra@timescaledb:5432/cassandra
       - DEPLOY_API_KEY=${DEPLOY_API_KEY:-}   # cle CI ; si vide -> mode dev non authentifie
@@ -169,7 +192,8 @@ services:
     container_name: cassandra-trainer
     command: ["python", "-u", "train_model.py", "--loop", "--interval", "86400"]
     depends_on:
-      - timescaledb
+      timescaledb:
+        condition: service_healthy
     environment:
       - DATABASE_URL=postgresql://cassandra:cassandra@timescaledb:5432/cassandra
       - GROUND_TRUTH_DIR=/data/results
