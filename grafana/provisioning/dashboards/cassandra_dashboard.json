@@ -22,10 +22,17 @@
         "hide": false,
         "iconColor": "#F2495C",
         "name": "FIRING alerts",
-        "rawQuery": true,
-        "rawSql": "SELECT opened_at AS time, endpoint_id || ' [' || signal_type || '] ' || severity AS text, 'FIRING' AS tags FROM alerts WHERE state IN ('firing','resolving') AND opened_at BETWEEN $__timeFrom() AND $__timeTo() AND endpoint_id = '$endpoint' ORDER BY opened_at",
         "showIn": 0,
-        "type": "tags"
+        "target": {
+          "datasource": {
+            "type": "postgres",
+            "uid": "DS_TIMESCALEDB"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT opened_at AS time, endpoint_id || ' [' || signal_type || '] ' || severity AS text, 'FIRING' AS tags FROM alerts WHERE opened_at IS NOT NULL AND opened_at BETWEEN $__timeFrom() AND $__timeTo() AND endpoint_id = '$endpoint' ORDER BY opened_at",
+          "refId": "Anno"
+        }
       },
       {
         "datasource": {
@@ -36,10 +43,17 @@
         "hide": false,
         "iconColor": "#73BF69",
         "name": "RESOLVED alerts",
-        "rawQuery": true,
-        "rawSql": "SELECT resolved_at AS time, endpoint_id || ' RESOLVED' AS text, 'RESOLVED' AS tags FROM alerts WHERE resolved_at IS NOT NULL AND resolved_at BETWEEN $__timeFrom() AND $__timeTo() AND endpoint_id = '$endpoint' ORDER BY resolved_at",
         "showIn": 0,
-        "type": "tags"
+        "target": {
+          "datasource": {
+            "type": "postgres",
+            "uid": "DS_TIMESCALEDB"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT resolved_at AS time, endpoint_id || ' RESOLVED' AS text, 'RESOLVED' AS tags FROM alerts WHERE resolved_at IS NOT NULL AND resolved_at BETWEEN $__timeFrom() AND $__timeTo() AND endpoint_id = '$endpoint' ORDER BY resolved_at",
+          "refId": "Anno"
+        }
       },
       {
         "datasource": {
@@ -50,10 +64,17 @@
         "hide": false,
         "iconColor": "#FFA6B0",
         "name": "Deploys",
-        "rawQuery": true,
-        "rawSql": "SELECT deployed_at AS time, service || ' ' || version AS text, 'deploy' AS tags FROM deploy_events WHERE deployed_at BETWEEN $__timeFrom() AND $__timeTo() ORDER BY deployed_at",
         "showIn": 0,
-        "type": "tags"
+        "target": {
+          "datasource": {
+            "type": "postgres",
+            "uid": "DS_TIMESCALEDB"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT deployed_at AS time, service || ' ' || version AS text, 'deploy' AS tags FROM deploy_events WHERE deployed_at BETWEEN $__timeFrom() AND $__timeTo() ORDER BY deployed_at",
+          "refId": "Anno"
+        }
       }
     ]
   },
@@ -1761,7 +1782,7 @@
     ]
   },
   "time": {
-    "from": "now-3h",
+    "from": "now-24h",
     "to": "now"
   },
   "timepicker": {},
