@@ -380,12 +380,14 @@ def run_detection(conn):
     _expected_states = {}
     maybe_load_model()
     rows = get_latest_features(cur)
-    pm.ENDPOINTS_SCORED.set(len(rows))
+    pm.ENDPOINTS_WITH_FEATURES.set(len(rows))
+    scored_count = 0
     for row in rows:
         endpoint_id, p99, err5xx, ts = row
 
         if p99 is None or (isinstance(p99, float) and math.isnan(p99)):
             continue
+        scored_count += 1
 
         # --- Signal p99 : layer 0 (static) + layer 1 (baseline) + layer 2 (ML) ---
         baselines = get_baselines(cur, endpoint_id, ML_METRICS, dow, hour)
@@ -515,6 +517,7 @@ def run_detection(conn):
         else:
             process_signal(cur, endpoint_id, "error_rate_5xx", False, None, 0.0, err5xx, None, now, _expected_states, p99=p99, err5xx=err5xx)
 
+    pm.ENDPOINTS_SCORED.set(scored_count)
     audit_state_consistency(cur, _expected_states)
     _update_metrics_gauges(cur)
     conn.commit()
