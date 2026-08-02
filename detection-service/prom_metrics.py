@@ -52,9 +52,7 @@ CYCLE_SECONDS = Histogram(
     buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30),
 )
 ENDPOINTS_WITH_FEATURES = Gauge(
-    "cassandra_detector_endpoints_with_features", "Endpoints avec features disponibles (avant filtre p99)")
-ENDPOINTS_SCORED = Gauge(
-    "cassandra_detector_endpoints_scored", "Endpoints effectivement scores au dernier cycle (p99 valide)")
+    "cassandra_detector_endpoints_with_features", "Endpoints ayant des features disponibles dans endpoint_features")
 ALERTS_STATE = Gauge(
     "cassandra_detector_alerts", "Alertes par etat", labelnames=["state"])
 ANOMALY_WRITES = Counter(

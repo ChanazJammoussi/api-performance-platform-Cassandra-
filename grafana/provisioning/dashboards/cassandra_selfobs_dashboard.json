@@ -790,9 +790,9 @@
     },
     {
       "type": "stat",
-      "title": "Endpoints / cycle",
+      "title": "Endpoints avec features",
       "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
-      "description": "scores = endpoints avec p99 valide (pipeline ML complet). avec features = endpoints observes avant filtre. Un ecart persistant signale un probleme de scraping.",
+      "description": "Nombre d endpoints ayant des features disponibles dans endpoint_features au dernier cycle.",
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -819,15 +819,8 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
-          "expr": "cassandra_detector_endpoints_scored",
-          "legendFormat": "scores",
-          "refId": "A"
-        },
-        {
-          "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
           "expr": "cassandra_detector_endpoints_with_features",
-          "legendFormat": "avec features",
-          "refId": "B"
+          "refId": "A"
         }
       ]
     },
