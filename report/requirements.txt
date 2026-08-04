@@ -1,0 +1,7 @@
+# Dependances pour generer le rapport PDF Cassandra
+# Installation :  pip install -r requirements.txt
+# Generation   :  python generate_report.py
+
+reportlab==5.0.0      # moteur PDF (Platypus + graphics)
+svglib==2.1.0         # rendu vectoriel des logos SVG (talan-logo.svg)
+lxml==6.1.1           # dependance de svglib (parsing SVG)
