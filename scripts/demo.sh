@@ -26,12 +26,19 @@ K6_NAME="cassandra-demo-k6"
 PSQL="docker exec cassandra-timescaledb psql -U cassandra -d cassandra -t"
 PSQLC="docker exec cassandra-timescaledb psql -U cassandra -d cassandra"
 
+# Ground truth de la panne (format runner.py) : sans elle, la panne de demo n'est
+# pas exclue de la baseline ni de l'entrainement.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SCRIPT_DIR/lib_ground_truth.sh"
+GT_OUT="${GT_DIR:-$SCRIPT_DIR/../scenario-runner/results/demo}/demo_$(date -u +%Y%m%d_%H%M%S).json"
+
 say()  { printf "\n\033[1;36m========== %s ==========\033[0m\n" "$*"; }
 info() { printf "  %s\n" "$*"; }
 
 cleanup() {
   docker stop "$K6_NAME" >/dev/null 2>&1 || true
   curl -s -X POST "$ORDERS/faults/reset" >/dev/null 2>&1 || true
+  gt_end
   info "Nettoyage : faute reset, trafic arrete."
 }
 trap cleanup EXIT
@@ -89,9 +96,12 @@ say "3. Injection d'une regression de latence (+${LATENCY_MS}ms sur $SERVICE)"
 # (preuve d'une detection fraiche, pas d'un etat residuel).
 DEMO_START=$($PSQL -c "SELECT now()" | sed 's/^ *//;s/ *$//')
 info "Debut de fenetre de detection : $DEMO_START"
+# Fin provisoire = attente max de detection + 120 s, remplacee par l'heure reelle au reset.
+gt_start "$GT_OUT" "demo" "latency_step" "$SERVICE" "$TARGET" "{\"latency_ms\": $LATENCY_MS}" $(( DETECT_WAIT + 120 ))
 curl -s -X POST "$ORDERS/faults/latency_step" -H 'Content-Type: application/json' \
   -d "{\"latency_ms\":$LATENCY_MS}" >/dev/null
 info "Faute injectee sur l'endpoint cible : $TARGET (SLO p99 = 300ms)."
+info "Ground truth enregistree : $GT_OUT"
 
 # --- 4. Attente de la detection (PENDING -> FIRING) ------------------------
 say "4. Attente de la detection (max ${DETECT_WAIT}s, cadence detecteur 60s)"

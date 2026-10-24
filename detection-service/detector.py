@@ -20,6 +20,7 @@ from features import compute_features, vectorize, direction_of, WINDOW_SIZE, MIN
 from ttd import estimate_ttd
 import ml_model
 import prom_metrics as pm
+from model_identity import ModelTracker, detection_identity
 
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -75,24 +76,33 @@ FIRE_THRESHOLD = 0.6
 # Metriques dont la couche ML a besoin de la baseline saisonniere.
 ML_METRICS = ["p50_ms", "p95_ms", "p99_ms", "rps"]
 
-# Cache du modele ML promu, recharge quand l'artefact latest change (retrain nightly).
-_ML = {"bundle": None, "mtime": 0.0}
+# Modele ML reellement charge par CE processus (identite = SHA-256 des octets charges),
+# recharge quand l'artefact latest change (retrain nightly). Un artefact illisible ou
+# incompatible est refuse : l'ancien modele reste actif (voir model_identity).
+_MODEL = ModelTracker()
 
 
 def maybe_load_model():
-    """Charge/recharge l'artefact ML promu si son mtime a change. Best-effort."""
-    path = ml_model.latest_path()
+    """(Re)charge l'artefact ML promu si besoin et publie son identite. Best-effort."""
     try:
-        mt = os.path.getmtime(path)
-    except OSError:
-        return  # pas d'artefact : la couche ML reste inactive
-    if _ML["bundle"] is None or mt > _ML["mtime"]:
-        bundle = ml_model.load_latest()
-        if bundle:
-            _ML["bundle"] = bundle
-            _ML["mtime"] = mt
-            log.info(f"Modele ML charge (trained_at={bundle['meta'].get('trained_at')}, "
-                     f"n={bundle['meta'].get('n_samples')})")
+        res = _MODEL.refresh()
+    except Exception as e:
+        log.error(f"Rechargement du modele echoue : {e}")
+        return
+    if res is None:
+        return
+    ident = _MODEL.identity()
+    if res["nouveau"]:
+        if res["resultat"] == "charge":
+            log.info(f"Modele ML charge (sha256={ident['sha256'][:12]}, "
+                     f"trained_at={ident.get('trained_at')})")
+        else:
+            log.error(f"Modele ML NON charge ({res['resultat']}, sha256={res['sha256']}) : "
+                      f"{'; '.join(res['raisons'])} -- modele actif : {ident['statut']}")
+    try:
+        pm.publish_model(ident, res["resultat"])
+    except Exception as e:
+        log.error(f"Publication de l'identite du modele echouee : {e}")
 
 
 def get_window(cur, endpoint_id, n):
@@ -379,6 +389,8 @@ def run_detection(conn):
     hour = now.hour
     _expected_states = {}
     maybe_load_model()
+    # Un seul instantane par cycle : le meme modele sert au calcul ET a la tracabilite.
+    active_model = _MODEL.current()
     rows = get_latest_features(cur)
     pm.ENDPOINTS_WITH_FEATURES.set(len(rows))
     for row in rows:
@@ -412,7 +424,8 @@ def run_detection(conn):
         # ne contribue qu'en cas de degradation, jamais sur une perf anormalement bonne.
         ml_norm = 0.0
         ml_top = None
-        bundle = _ML["bundle"]
+        ml_used = False
+        bundle = active_model.bundle
         if feat is not None and bundle is not None:
             try:
                 x = vectorize(feat)
@@ -420,6 +433,7 @@ def run_detection(conn):
                 raw = ml_model.raw_anomaly(bundle["model"], x)[0]
                 ml_norm = float(ml_model.calibrate(raw, meta["calibration"]))
                 ml_top = ml_model.attribute(bundle["model"], x, meta["feature_medians"], meta.get("calibration"))
+                ml_used = True
             except Exception as e:
                 log.error(f"ML scoring failed for {endpoint_id}: {e}")
         ml_gated = ml_norm if direction == "degradation" else 0.0
@@ -476,6 +490,8 @@ def run_detection(conn):
                 "expected": round(p50b, 2) if p50b is not None else None,
                 "band": [round(p10, 2), round(p90, 2)] if (p10 is not None and p90 is not None) else None,
             },
+            # Tracabilite : identite du modele actif de CE cycle (pas du fichier sur disque).
+            "model": detection_identity(active_model, ml_used),
         }
 
         # Analyse du graphe de dependances : enrichit contributing avec les

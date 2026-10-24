@@ -3,6 +3,13 @@
 Objectif : montrer la chaîne complète en ~20 min.  
 Chaque étape indique ce qu'on capture en screenshot.
 
+> ⚠️ **Avertissement — construction de la baseline.** Pendant la construction d'une
+> nouvelle baseline (warm-up de trafic normal) et avant l'entraînement du modèle,
+> **n'injecter aucune panne non enregistrée**. Toute panne doit laisser un fichier
+> ground truth dans `scenario-runner/results/` (runner.py, `scripts/demo.sh`, ou les
+> blocs « ground truth » des étapes 7b et 13 ci-dessous). Une panne sans ground truth
+> n'est pas exclue : elle pollue la baseline et l'entraînement.
+
 ---
 
 ## Prérequis (1 min)
@@ -122,6 +129,8 @@ Revenir au premier terminal. Attendre que la préchauffage k6 soit à ≥2 min, 
 bash scripts/demo.sh
 ```
 
+Le script enregistre automatiquement la ground truth dans `scenario-runner/results/demo/`.
+
 ### Option B — contrôle manuel étape par étape
 
 **Étape 7a : enregistrer le déploiement**
@@ -135,6 +144,36 @@ curl -s -X POST http://localhost:8090/deploys `
 **Screenshot 6** : réponse `{"deploy_id": "...", "service": "orders", "version": "v2.5.0-demo"}`.
 
 **Étape 7b : injecter la régression (+700ms sur orders)**
+
+D'abord enregistrer la ground truth (obligatoire, voir l'avertissement en tête du guide).
+Fin provisoire à +30 min, remplacée par l'heure réelle à l'étape 13 :
+
+```powershell
+# --- ground truth : debut de panne (format scenario-runner/runner.py)
+$TS_FMT = "yyyy-MM-dd'T'HH':'mm':'ss'.'ffffff'+00:00'"
+$INV = [Globalization.CultureInfo]::InvariantCulture
+$GT_DIR = Join-Path $PWD "scenario-runner\results\demo"
+New-Item -ItemType Directory -Force $GT_DIR | Out-Null
+$now = (Get-Date).ToUniversalTime()
+$GT_FILE = Join-Path $GT_DIR ("demo_guide_" + $now.ToString("yyyyMMdd_HHmmss", $INV) + ".json")
+if (Test-Path $GT_FILE) { throw "ground truth deja presente : $GT_FILE" }
+$gt = [ordered]@{
+  duration_override = $null
+  faults = @([ordered]@{
+    scenario_id     = "demo"
+    fault_type      = "latency_step"
+    target_service  = "orders"
+    target_endpoint = "GET /orders/{order_id}"
+    injected_at     = $now.ToString($TS_FMT, $INV)
+    cleared_at      = $now.AddMinutes(30).ToString($TS_FMT, $INV)
+    magnitude       = [ordered]@{ latency_ms = 700 }
+  })
+}
+[IO.File]::WriteAllText($GT_FILE, ($gt | ConvertTo-Json -Depth 5))  # UTF-8 sans BOM
+echo "Ground truth enregistree : $GT_FILE"
+```
+
+Puis injecter la panne :
 
 ```powershell
 $DEMO_START = docker exec cassandra-timescaledb psql -U cassandra -d cassandra -t -c "SELECT now()" |
@@ -252,7 +291,21 @@ docker stop cassandra-k6
 
 # Réinitialiser la faute
 curl -s -X POST http://localhost:8001/faults/reset
+```
 
+Puis clôturer la ground truth avec l'heure réelle du rétablissement (fonctionne aussi
+dans un nouveau terminal : on reprend le dernier fichier `demo_guide_*.json`) :
+
+```powershell
+# --- ground truth : fin de panne
+$GT_FILE = (Get-ChildItem "scenario-runner\results\demo\demo_guide_*.json" | Sort-Object Name | Select-Object -Last 1).FullName
+$gt = Get-Content $GT_FILE -Raw | ConvertFrom-Json
+$gt.faults[0].cleared_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd'T'HH':'mm':'ss'.'ffffff'+00:00'", [Globalization.CultureInfo]::InvariantCulture)
+[IO.File]::WriteAllText($GT_FILE, ($gt | ConvertTo-Json -Depth 5))  # UTF-8 sans BOM
+echo "Ground truth cloturee : $GT_FILE"
+```
+
+```powershell
 # (Optionnel) Stopper la stack
 docker compose down
 ```

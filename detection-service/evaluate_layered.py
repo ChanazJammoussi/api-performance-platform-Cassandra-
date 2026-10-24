@@ -18,13 +18,18 @@ Metriques (spec 9.2) par type de faute :
   - lead time (gradual) : combien de temps le layered fire AVANT le static
   - faux positifs (firing hors de toute fenetre d'injection)
 
-Usage :
-    python evaluate_layered.py                       # campagne par defaut
-    python evaluate_layered.py --input <dir|fichier>
-    python evaluate_layered.py --output rapport.json
+Usage (campagne designee explicitement, format officiel -- voir validation_checks) :
+    python evaluate_layered.py --input <campaign_AAAAMMJJ_HHMM>      # ou EVAL_INPUT
+    python evaluate_layered.py --input <campagne> --candidate <modele.joblib>
+    python evaluate_layered.py --input <campagne> --output rapport.json
+  Codes de sortie : 0 resultats officiels ; 2 diagnostic seulement (pas de resultat
+  officiel) ; 1 campagne non designee ; 3 --persist demande (toujours refuse, aucune
+  ecriture dans ce lot).
 """
 
 import argparse
+import hashlib
+import io
 import json
 import os
 import statistics
@@ -34,13 +39,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import joblib
 import psycopg2
 
 import ml_model
+import validation_checks as vc
 from features import compute_features, vectorize, direction_of, WINDOW_SIZE, MIN_WINDOW
 from baseline_utils import compute_deviation, pg_dow, ENDPOINT_SLOS, DEFAULT_SLOS
-from train_model import load_baseline_lookup, baseline_for
-from evaluation import load_injection_windows  # reutilise le parsing du ground-truth
+from train_model import (load_baseline_lookup, baseline_for, baseline_lookup_from_rows,
+                         BASELINE_METRICS)
+from evaluation import load_injection_windows, InjectionWindow  # parsing du ground-truth
 
 DB_URL = os.environ.get("DATABASE_URL", "postgresql://cassandra:cassandra@localhost:5434/cassandra")
 
@@ -51,10 +59,25 @@ _GT_DIR = os.environ.get(
         os.path.dirname(os.path.abspath(__file__)), "..", "scenario-runner", "results"
     )),
 )
-# Jeu d'evaluation par defaut : la campagne structuree (tous types x magnitudes).
-DEFAULT_INPUT = os.environ.get(
-    "EVAL_INPUT", os.path.join(_GT_DIR, "campaign_20260706_1109", "ground_truth")
-)
+
+
+def latest_campaign_input(gt_dir=None):
+    """
+    Jeu d'evaluation par defaut : EVAL_INPUT s'il est defini, sinon la campagne la
+    plus recente <gt_dir>/campaign_*/ground_truth (les campagnes rangees dans
+    archive/ sont ignorees). None si aucune campagne.
+    A appeler au moment de l'usage : un process long (trainer) voit ainsi les
+    campagnes creees apres son demarrage.
+    """
+    env = os.environ.get("EVAL_INPUT")
+    if env:
+        return env
+    root = Path(gt_dir) if gt_dir else Path(_GT_DIR)
+    campaigns = sorted(p for p in root.glob("campaign_*/ground_truth") if p.is_dir())
+    return str(campaigns[-1]) if campaigns else None
+
+
+DEFAULT_INPUT = latest_campaign_input()  # valeur a l'import, pour compatibilite
 
 M_WINDOWS = 2                     # hysteresis (= PENDING_WINDOWS de detector.py)
 FIRE_THRESHOLD = 0.6              # seuil de score combine (= detector.py, tune spec 9.2)
@@ -373,69 +396,376 @@ def print_sensitivity(mag_groups):
         print(f"{ft:<20} {mag:>9} {s.tp + s.fn:>3}  {_fmt(_rate(s)):>9} {_fmt(_rate(l)):>10}")
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, default=Path(DEFAULT_INPUT))
-    parser.add_argument("--output", type=Path, help="Rapport JSON optionnel")
-    parser.add_argument("--persist", action="store_true",
-                        help="Ecrit les resultats dans la table eval_runs (dashboard Grafana)")
-    args = parser.parse_args()
+# ---------------------------------------------------------------------------
+# Evaluation officielle / diagnostique d'une campagne (lot 2b-2)
+# ---------------------------------------------------------------------------
+# Principes :
+#  - campagne designee explicitement, validee par validation_checks (format officiel) ;
+#  - baseline reconstruite UNIQUEMENT depuis l'instantane de la campagne (jamais
+#    endpoint_baseline en base) ;
+#  - couverture alignee sur le rejeu : derniere ligne de chaque endpoint ignoree
+#    (build_onsets), MIN_WINDOW lignes de contexte, M_WINDOWS lignes pendant la panne ;
+#  - resultats OFFICIELS seulement si TOUTES les fenetres sont evaluables et le
+#    denominateur des FP est non nul ; sinon resultats DIAGNOSTIQUES uniquement ;
+#  - C (modele en service) : aucun chiffre tant que son identite n'est pas verifiable.
 
-    windows = load_windows(args.input)
-    if not windows:
-        print(f"aucune fenetre d'injection dans {args.input}", file=sys.stderr)
+FEATURES_PY = Path(__file__).resolve().parent / "features.py"
+GRACE_S = int(GRACE.total_seconds())
+# Mesures lues par score_point pour S (static_breach, error_breach) et B (deviation p99).
+SB_METRICS = ("p99_ms", "error_rate_5xx")
+# Baselines utilisees : B -> p99 (compute_deviation, direction_of) ; N/C -> BASELINE_METRICS.
+B_BASELINE_METRICS = ("p99_ms",)
+C_RESULT = {
+    "statut": "non_verifiable",
+    "raison": "identite du modele reellement charge par le service non disponible "
+              "(prevue au lot 2b-5) : aucun chiffre n'est fourni pour C",
+}
+PERSIST_REFUSAL = (
+    "--persist refuse, aucune ecriture : C (modele en service) n'est pas identifiable et "
+    "eval_runs ne peut pas representer fidelement S, B, C et N sans changement de schema")
+
+
+def _window_obj(w):
+    """Fenetre validation_checks -> InjectionWindow (reutilise match_window / magnitude_of)."""
+    return InjectionWindow(scenario_id=w.get("scenario_id"), fault_type=w["fault_type"],
+                           target_endpoint=w["target_endpoint"], injected_at=w["injected"],
+                           cleared_at=w["cleared"], magnitude=w.get("magnitude", {}),
+                           source_file=w["source"])
+
+
+def _fault_ranges(windows):
+    return [(w["injected"], w["cleared"] + GRACE) for w in windows]
+
+
+def observable_hours_outside_faults(by_ep, gt_windows, scrape_s):
+    """
+    Denominateur des faux positifs : heures observables HORS PANNE.
+      - on ne garde que les lignes reellement rejouees (derniere ligne de chaque
+        endpoint exclue, comme build_onsets) ;
+      - on retire celles qui tombent dans une fenetre de panne [injected, cleared + 120 s]
+        (TOUTES les pannes de la ground truth, evaluables ou non) ;
+      - on compte les intervalles de collecte distincts (scrape_s) contenant au moins une
+        de ces lignes, tous endpoints confondus.
+    Renvoie (heures, intervalles). 0 -> taux de FP impossible a calculer.
+    """
+    ranges = _fault_ranges(gt_windows)
+    buckets = set()
+    for rows in by_ep.values():
+        usable = rows[:-1] if len(rows) > 1 else rows
+        for r in usable:
+            t = r["time"]
+            if any(a <= t <= b for a, b in ranges):
+                continue
+            buckets.add(int(t.timestamp() // scrape_s))
+    return len(buckets) * scrape_s / 3600.0, len(buckets)
+
+
+def configuration_stats(onsets, series, compared, gt_windows, hours):
+    """
+    Indicateurs d'une configuration (series 'static' = S, 'layered' = B ou N) sur la
+    liste `compared` de fenetres (identique pour toutes les configurations).
+      recall          = detectees / fenetres comparees
+      delai_median_s  = mediane (premiere alerte - injected_at), fenetres detectees
+      fp              = alertes hors de TOUTE fenetre de panne (+120 s)
+      fp_par_heure    = fp / heures observables hors panne (None si heures = 0)
+      alertes_pendant_panne_non_comparee : alertes pendant une panne reelle dont la
+                        fenetre n'est pas comparee -- ni vrai ni faux positif
+    """
+    compared_ids = {id(w) for w in compared}
+    per_type, per_mag, delays = {}, {}, []
+    tp = 0
+    for w in compared:
+        d = match_window(onsets.get(w["target_endpoint"], {}).get(series, []), _window_obj(w))
+        hit = d is not None
+        tp += hit
+        if hit:
+            delays.append(d)
+        for agg, key in ((per_type, w["fault_type"]),
+                         (per_mag, f"{w['fault_type']}/{magnitude_of(_window_obj(w))}")):
+            s = agg.setdefault(key, {"detectees": 0, "total": 0, "delais": []})
+            s["total"] += 1
+            if hit:
+                s["detectees"] += 1
+                s["delais"].append(d)
+    all_ranges = _fault_ranges(gt_windows)
+    other_ranges = [(w["injected"], w["cleared"] + GRACE) for w in gt_windows if id(w) not in compared_ids]
+    fp = ambiguous = 0
+    for dets in onsets.values():
+        for o in dets.get(series, []):
+            if any(a <= o <= b for a, b in other_ranges):
+                ambiguous += 1
+            elif not any(a <= o <= b for a, b in all_ranges):
+                fp += 1
+
+    def fmt(s):
+        return {"detectees": s["detectees"], "total": s["total"],
+                "recall": s["detectees"] / s["total"], "delai_median_s": _med(s["delais"])}
+
+    return {
+        "fenetres": len(compared), "detectees": tp,
+        "recall": tp / len(compared) if compared else None,
+        "delai_median_s": _med(delays),
+        "fp": fp, "fp_par_heure": (fp / hours) if hours else None,
+        "alertes_pendant_panne_non_comparee": ambiguous,
+        "par_type": {k: fmt(v) for k, v in sorted(per_type.items())},
+        "par_type_et_niveau": {k: fmt(v) for k, v in sorted(per_mag.items())},
+    }
+
+
+def load_candidate(path):
+    """
+    Candidat N : (bundle | None, sha256 | None, raisons). Les octets sont lus UNE fois ;
+    l'empreinte est celle de ces octets, et le modele est charge depuis ces memes octets.
+    Le fichier est un artefact joblib fourni explicitement (a ne charger que de confiance).
+    """
+    try:
+        raw = Path(path).read_bytes()
+    except OSError as e:
+        return None, None, [f"candidat illisible ({e})"]
+    sha = hashlib.sha256(raw).hexdigest()
+    try:
+        bundle = joblib.load(io.BytesIO(raw))
+    except Exception as e:
+        return None, sha, [f"candidat non chargeable ({e})"]
+    problems = ml_model.check_bundle_compat(bundle)
+    return (bundle if not problems else None), sha, problems
+
+
+def _window_diagnostics(windows, coverage, metric_cov, completeness, fallback, need_ml):
+    """Evaluabilite de chaque fenetre pour S/B et pour N, avec les raisons precises."""
+    out = []
+    for w, cov, mc, comp, fb in zip(windows, coverage, metric_cov, completeness, fallback):
+        why_sb = list(cov["reasons"])
+        for m in SB_METRICS:
+            n = mc["metrics"][m]["pendant_valides"]
+            if n < M_WINDOWS:
+                why_sb.append(f"{m} : {n} valeur(s) valide(s) pendant la panne (< {M_WINDOWS})")
+        if cov["during_points"] < cov["expected_points"] and (
+                cov["during_points"] < M_WINDOWS or cov["context_points"] < MIN_WINDOW):
+            why_sb.append(f"trous dans les mesures : {cov['during_points']}/{cov['expected_points']} "
+                          f"intervalles presents pendant la panne (plus grand ecart "
+                          f"{cov['max_gap_s']} s)")
+
+        def baseline_reasons(metrics):
+            r = []
+            for m in metrics:
+                st = comp["metrics"][m]
+                if st in ("absent", "degenere"):
+                    r.append(f"baseline {m} {st} ({comp['slots'][m]})")
+                elif fb["metrics"][m]["creneaux_secours"] and not fb["metrics"][m]["valide"]:
+                    r.append(f"baseline {m} : bande de secours inutilisable")
+            return r
+
+        why_sb += baseline_reasons(B_BASELINE_METRICS)
+        why_ml = list(why_sb)
+        if need_ml:
+            for m in BASELINE_METRICS:
+                if m in SB_METRICS:
+                    continue
+                n = mc["metrics"][m]["pendant_valides"]
+                if n < M_WINDOWS:
+                    why_ml.append(f"{m} : {n} valeur(s) valide(s) pendant la panne (< {M_WINDOWS})")
+            why_ml += baseline_reasons([m for m in BASELINE_METRICS if m not in B_BASELINE_METRICS])
+        out.append({
+            "source": w["source"], "fault_type": w["fault_type"], "target_endpoint": w["target_endpoint"],
+            "evaluable_SB": not why_sb, "raisons_SB": why_sb,
+            "evaluable_N": (not why_ml) if need_ml else None, "raisons_N": why_ml if need_ml else None,
+            "contexte": cov["context_points"], "pendant": cov["during_points"],
+            "attendus": cov["expected_points"], "completude": cov["completeness"],
+            "plus_grand_ecart_s": cov["max_gap_s"],
+            "creneaux_secours": {m: fb["metrics"][m]["creneaux_secours"] for m in BASELINE_METRICS},
+            "baseline": comp["metrics"],
+        })
+    return out
+
+
+def evaluate_campaign(conn, campaign_dir, *, candidate_path=None):
+    """
+    Evalue une campagne au format officiel. N'interroge que endpoint_features (lecture) ;
+    la baseline vient exclusivement de l'instantane. Renvoie un dict :
+      statut   : officiel | couverture_insuffisante | fp_non_calculable |
+                 campagne_invalide | aucune_mesure
+      raisons  : pourquoi il n'y a pas de resultat officiel
+      officiel : {S, B, C, N, identite} si statut == officiel, sinon None
+      diagnostic : fenetres (evaluables ou non, raisons), couverture, baseline,
+                   resultats PARTIELS sur les fenetres evaluables -- jamais officiels
+    """
+    res = {"campagne": str(campaign_dir), "statut": None, "raisons": [],
+           "officiel": None, "diagnostic": {}}
+    diag = res["diagnostic"]
+    chk = vc.check_campaign(campaign_dir, require_completed=True, features_py=FEATURES_PY)
+    manifest = chk["manifest"] or {}
+    scrape_s = manifest.get("scrape_interval")
+    if chk["ok"] and not (isinstance(scrape_s, int) and scrape_s > 0):
+        chk["reasons"].append("manifest.json : scrape_interval entier positif requis")
+    if chk["reasons"]:
+        res.update(statut="campagne_invalide", raisons=list(chk["reasons"]))
+        return res
+    windows = chk["windows"]
+
+    rows, snap_reasons = vc.check_baseline_snapshot(campaign_dir, manifest["baseline_fingerprint"])
+    if snap_reasons:   # deja controle par check_campaign ; garde-fou
+        res.update(statut="campagne_invalide", raisons=snap_reasons)
+        return res
+    exact, fallback = baseline_lookup_from_rows(rows)
+    context_s = WINDOW_SIZE * scrape_s
+    completeness, _ = vc.baseline_completeness(rows, windows, list(BASELINE_METRICS),
+                                               context_s=context_s, grace_s=GRACE_S)
+    fb_report, _ = vc.fallback_band_report(rows, windows, list(BASELINE_METRICS),
+                                           context_s=context_s, grace_s=GRACE_S)
+
+    since = min(w["injected"] for w in windows) - PAD
+    until = max(w["cleared"] for w in windows) + PAD
+    by_ep = load_features_span(conn, since, until)
+    diag["periode_mesures"] = [since.isoformat(), until.isoformat()]
+    diag["lignes_par_endpoint"] = {ep: len(v) for ep, v in sorted(by_ep.items())}
+    if not any(by_ep.values()):
+        res.update(statut="aucune_mesure",
+                   raisons=["aucune mesure valide (endpoint_features) sur la periode de la campagne"])
+        return res
+
+    coverage = vc.window_coverage(
+        windows, {ep: [r["time"] for r in v] for ep, v in by_ep.items()},
+        min_context=MIN_WINDOW, min_points=M_WINDOWS, context_s=context_s, grace_s=GRACE_S,
+        scrape_s=scrape_s, exclude_last_point=True)
+    metric_cov = vc.metric_coverage(windows, by_ep, list(BASELINE_METRICS) + ["error_rate_5xx"],
+                                    context_s=context_s, grace_s=GRACE_S, exclude_last_point=True)
+
+    candidate, cand_sha, cand_reasons = (None, None, [])
+    if candidate_path is not None:
+        candidate, cand_sha, cand_reasons = load_candidate(candidate_path)
+    per_window = _window_diagnostics(windows, coverage, metric_cov, completeness, fb_report,
+                                     need_ml=candidate is not None)
+    diag["fenetres"] = per_window
+    diag["couverture_par_endpoint"] = vc.coverage_summary(
+        [dict(c, evaluable=p["evaluable_SB"]) for c, p in zip(coverage, per_window)])["by_endpoint"]
+    hours, intervals = observable_hours_outside_faults(by_ep, windows, scrape_s)
+    diag["heures_observables_hors_panne"] = hours
+    diag["intervalles_observables_hors_panne"] = intervals
+
+    eval_sb = [w for w, p in zip(windows, per_window) if p["evaluable_SB"]]
+    eval_n = [w for w, p in zip(windows, per_window) if p["evaluable_N"]] if candidate is not None else []
+    compared = eval_n if candidate is not None else eval_sb
+
+    def run(compared_windows):
+        base = build_onsets(by_ep, exact, fallback, None)
+        out = {
+            "identite": {
+                "empreinte_fenetres_campagne": vc.window_list_fingerprint(windows),
+                "empreinte_fenetres_comparees": vc.window_list_fingerprint(compared_windows),
+                "empreinte_baseline": manifest["baseline_fingerprint"],
+                "periode_mesures": diag["periode_mesures"],
+                "heures_observables_hors_panne": hours,
+            },
+            "S": configuration_stats(base, "static", compared_windows, windows, hours),
+            "B": configuration_stats(base, "layered", compared_windows, windows, hours),
+            "C": dict(C_RESULT),
+        }
+        if candidate_path is None:
+            out["N"] = {"statut": "non_fourni"}
+        elif candidate is None:
+            out["N"] = {"statut": "incompatible", "sha256": cand_sha, "raisons": cand_reasons}
+        else:
+            n_onsets = build_onsets(by_ep, exact, fallback, candidate)
+            out["N"] = dict(configuration_stats(n_onsets, "layered", compared_windows, windows, hours),
+                            statut="evalue", sha256=cand_sha)
+        return out
+
+    complete = len(compared) == len(windows)
+    if complete and hours > 0:
+        res.update(statut="officiel", officiel=run(compared))
+        return res
+    if not complete:
+        res["statut"] = "couverture_insuffisante"
+        res["raisons"].append(f"{len(windows) - len(compared)} fenetre(s) sur {len(windows)} non "
+                              f"evaluable(s) : aucun resultat officiel (voir diagnostic)")
+    else:
+        res["statut"] = "fp_non_calculable"
+        res["raisons"].append("aucune heure observable hors panne : taux de faux positifs "
+                              "impossible a calculer")
+    if compared:
+        diag["resultats_partiels"] = dict(run(compared), avertissement=(
+            "RESULTATS DIAGNOSTIQUES PARTIELS -- calcules sur les seules fenetres evaluables ; "
+            "ce n'est PAS une evaluation officielle complete"))
+    return res
+
+
+def _print_config(name, c):
+    if c.get("statut") in ("non_verifiable", "non_fourni", "incompatible"):
+        detail = c.get("raison") or "; ".join(c.get("raisons", [])) or ""
+        print(f"  {name:<2} : {c['statut']}  {detail}")
+        return
+    fph = "impossible" if c["fp_par_heure"] is None else f"{c['fp_par_heure']:.2f}"
+    print(f"  {name:<2} : recall {_fmt(c['recall'])} ({c['detectees']}/{c['fenetres']})  "
+          f"delai median {_fmt(c['delai_median_s'])} s  FP {c['fp']} ({fph} /h observable)  "
+          f"alertes pendant pannes non comparees {c['alertes_pendant_panne_non_comparee']}")
+
+
+def print_campaign_result(res):
+    print(f"Campagne : {res['campagne']}")
+    print(f"Statut   : {res['statut']}")
+    if res["officiel"]:
+        o = res["officiel"]
+        print("\n=== RESULTATS OFFICIELS ===")
+        print(f"  fenetres comparees : {o['S']['fenetres']}  |  heures observables hors panne : "
+              f"{o['identite']['heures_observables_hors_panne']:.2f}")
+        for k in ("S", "B", "C", "N"):
+            _print_config(k, o[k])
+    else:
+        print("\n=== AUCUN RESULTAT OFFICIEL ===")
+        for r in res["raisons"]:
+            print(f"  - {r}")
+    d = res["diagnostic"]
+    if d.get("fenetres"):
+        print("\n=== DIAGNOSTIC (non officiel) ===")
+        for f in d["fenetres"]:
+            etat = "evaluable" if f["evaluable_SB"] else "NON evaluable"
+            print(f"  {f['source']:<40} {f['fault_type']:<16} {etat:<14} "
+                  f"pendant {f['pendant']}/{f['attendus']}  ecart max {f['plus_grand_ecart_s']} s  "
+                  f"secours {sum(f['creneaux_secours'].values())}")
+            for r in f["raisons_SB"]:
+                print(f"      - {r}")
+        print(f"  heures observables hors panne : {d.get('heures_observables_hors_panne', 0):.2f}")
+    if d.get("resultats_partiels"):
+        p = d["resultats_partiels"]
+        print(f"\n  {p['avertissement']}")
+        for k in ("S", "B", "C", "N"):
+            _print_config(k, p[k])
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input", type=Path, default=None,
+                        help="Dossier de campagne (campaign_AAAAMMJJ_HHMM) ; defaut : EVAL_INPUT. "
+                             "Aucune selection automatique.")
+    parser.add_argument("--candidate", type=Path, default=None,
+                        help="Artefact joblib du modele candidat N (optionnel)")
+    parser.add_argument("--output", type=Path, help="Rapport JSON optionnel (officiel + diagnostic)")
+    parser.add_argument("--persist", action="store_true",
+                        help="Refuse dans ce lot (aucune ecriture dans eval_runs)")
+    args = parser.parse_args(argv)
+
+    campaign = args.input or (Path(os.environ["EVAL_INPUT"]) if os.environ.get("EVAL_INPUT") else None)
+    if campaign is None:
+        print("campagne explicite requise : --input <dossier de campagne> ou EVAL_INPUT "
+              "(aucune selection automatique)", file=sys.stderr)
         return 1
-    since = min(w.injected_at for w in windows) - PAD
-    until = max(w.cleared_at for w in windows) + PAD
-    span_hours = (until - since).total_seconds() / 3600
-    print(f"Fenetres d'injection : {len(windows)}  |  span {since:%Y-%m-%d %H:%M} -> {until:%H:%M} "
-          f"({span_hours:.1f}h)")
 
     conn = psycopg2.connect(DB_URL)
-    by_ep = load_features_span(conn, since, until)
-    exact, fallback = load_baseline_lookup(conn)
-    conn.close()
-    model_bundle = ml_model.load_latest()
-    print(f"Features : {sum(len(v) for v in by_ep.values())} points / {len(by_ep)} endpoints  |  "
-          f"modele ML : {'charge' if model_bundle else 'ABSENT (layered=baseline seul)'}")
-
-    onsets = build_onsets(by_ep, exact, fallback, model_bundle)
-    per_type, fp, lead_times = evaluate(windows, onsets)
-    print_report(per_type, fp, lead_times, span_hours)
-
-    # Courbe de sensibilite : detection rate par (fault_type, magnitude).
-    mag_groups = group_stats(windows, onsets, lambda w: (w.fault_type, magnitude_of(w)))
-    if any(mag != "all" for _, mag in mag_groups):
-        print("\n=== Sensibilite (detection rate par magnitude) ===")
-        print_sensitivity(mag_groups)
-
-    if args.persist:
-        conn2 = psycopg2.connect(DB_URL)
-        try:
-            persist(conn2, str(args.input), per_type, fp, span_hours, mag_groups)
-        finally:
-            conn2.close()
+    try:
+        conn.set_session(readonly=True)
+        res = evaluate_campaign(conn, campaign, candidate_path=args.candidate)
+    finally:
+        conn.close()
+    print_campaign_result(res)
 
     if args.output:
-        payload = {
-            "input": str(args.input),
-            "span_hours": span_hours,
-            "false_positives": fp,
-            "lead_time_median_s": _med(lead_times),
-            "per_fault_type": {
-                ft: {
-                    "n": d["static"].tp + d["static"].fn,
-                    "detection_rate_static": _rate(d["static"]),
-                    "detection_rate_layered": _rate(d["layered"]),
-                    "median_delay_static_s": _med(d["static"].delays),
-                    "median_delay_layered_s": _med(d["layered"].delays),
-                }
-                for ft, d in per_type.items()
-            },
-        }
-        args.output.write_text(json.dumps(payload, indent=2))
+        args.output.write_text(json.dumps(res, indent=2, default=str))
         print(f"\nrapport ecrit dans {args.output}")
-    return 0
+    if args.persist:
+        print(f"\n{PERSIST_REFUSAL}", file=sys.stderr)
+        return 3
+    return 0 if res["statut"] == "officiel" else 2
 
 
 if __name__ == "__main__":

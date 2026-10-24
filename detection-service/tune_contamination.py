@@ -73,8 +73,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--contams", type=float, nargs="+", default=DEFAULT_CONTAMS)
     parser.add_argument("--thresholds", type=float, nargs="+", default=DEFAULT_THRESHOLDS)
-    parser.add_argument("--input", type=Path, default=Path(ev.DEFAULT_INPUT))
+    parser.add_argument("--input", type=Path, default=None,
+                        help="Campagne ground truth (defaut : EVAL_INPUT ou la plus recente)")
     args = parser.parse_args()
+
+    if args.input is None:
+        default = ev.latest_campaign_input()
+        if default is None:
+            print("aucune campagne d'evaluation (campaign_*/ground_truth) : preciser --input ou EVAL_INPUT")
+            return 1
+        args.input = Path(default)
 
     windows = ev.load_windows(args.input)
     if not windows:

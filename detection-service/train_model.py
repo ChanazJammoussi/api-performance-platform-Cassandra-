@@ -78,26 +78,41 @@ def load_feature_rows(conn, lookback_days):
     return by_ep
 
 
+BASELINE_COLUMNS = ("endpoint_id", "metric", "dow", "hour_bucket", "p10", "p50", "p90")
+
+
 def load_baseline_lookup(conn):
     """
-    Charge endpoint_baseline en memoire :
-      exact[(endpoint, metric, dow, hour)] = (p10, p50, p90)
-      fallback[(endpoint, metric)]         = (min p10, avg p50, max p90)  # cf get_baseline
+    Charge endpoint_baseline (base de donnees) en memoire -- voir
+    baseline_lookup_from_rows pour la structure renvoyee.
     """
     cur = conn.cursor()
     cur.execute("""
         SELECT endpoint_id, metric, dow, hour_bucket, p10, p50, p90
         FROM endpoint_baseline
     """)
+    rows = [dict(zip(BASELINE_COLUMNS, t)) for t in cur.fetchall()]
+    cur.close()
+    return baseline_lookup_from_rows(rows)
+
+
+def baseline_lookup_from_rows(rows):
+    """
+    Baseline en memoire a partir de lignes endpoint_baseline (dicts avec les
+    colonnes BASELINE_COLUMNS) : lues en base OU dans l'instantane d'une campagne.
+      exact[(endpoint, metric, dow, hour)] = (p10, p50, p90)
+      fallback[(endpoint, metric)]         = (min p10, avg p50, max p90)  # cf get_baseline
+    Valeurs vides ignorees dans les agregats. Fonction pure (aucune lecture en base).
+    """
     exact = {}
     agg = {}
-    for ep, metric, dow, hour, p10, p50, p90 in cur.fetchall():
-        exact[(ep, metric, int(dow), int(hour))] = (p10, p50, p90)
+    for r in rows:
+        ep, metric, p10, p50, p90 = r["endpoint_id"], r["metric"], r["p10"], r["p50"], r["p90"]
+        exact[(ep, metric, int(r["dow"]), int(r["hour_bucket"]))] = (p10, p50, p90)
         a = agg.setdefault((ep, metric), {"p10": [], "p50": [], "p90": []})
         if p10 is not None: a["p10"].append(p10)
         if p50 is not None: a["p50"].append(p50)
         if p90 is not None: a["p90"].append(p90)
-    cur.close()
     fallback = {}
     for key, a in agg.items():
         fallback[key] = (
@@ -202,27 +217,61 @@ def _recall_fp(ev, windows, by_ep, exact, fallback, bundle):
     return recall, fp["layered"]
 
 
-def validate_promotion(conn, candidate_bundle):
+# Statuts de validation autorisant la promotion. "initialisation" = premier modele,
+# promu sans reference : il n'est PAS valide (consigne dans meta["validation"]).
+PROMOTABLE_VALIDATION = ("ok", "initialisation")
+
+
+def _windows_with_data(windows, by_ep):
+    """Nombre de fenetres d'injection contenant au moins une mesure endpoint_features."""
+    times = [r["time"] for rows in by_ep.values() for r in rows]
+    return sum(1 for w in windows if any(w.injected_at <= t <= w.cleared_at for t in times))
+
+
+def validate_promotion(conn, candidate_bundle, store=None):
     """
-    Rejoue l'evaluation layered avec le modele CANDIDAT et le modele COURANT sur le
-    jeu de validation (campagne), et refuse la promotion si le candidat degrade la
-    detection (recall en baisse au-dela de la tolerance) ou fait exploser les FP.
+    Rejoue l'evaluation layered avec le modele CANDIDAT et le modele COURANT sur la
+    campagne d'evaluation la plus recente, et renvoie (statut, rapport) :
+      initialisation : aucun modele courant -> premier modele, NON valide
+      ok             : le candidat ne degrade ni le recall ni les FP (tolerances)
+      regression     : le candidat degrade la detection
+      impossible     : pas de campagne, campagne vide, ou aucune mesure dans ses
+                       fenetres d'injection
+    Une validation impossible n'est jamais une reussite.
+    store : diagnostic (etat, bundle, detail) de ml_model.model_store_state(), pris
+    AVANT toute ecriture du cycle (sinon la fenetre de reference fraichement creee
+    ferait paraitre le depot incoherent) ; recalcule si absent.
     Complementaire du sanity-gate (qui, lui, ne regarde que la distribution des scores).
     Import paresseux d'evaluate_layered pour eviter l'import circulaire.
     """
     from pathlib import Path
     import evaluate_layered as ev
 
-    windows = ev.load_windows(Path(ev.DEFAULT_INPUT))
+    state, current, detail = store if store is not None else ml_model.model_store_state()
+    if state == "absent":
+        return "initialisation", ("validation : initialisation du premier modele, NON validee "
+                                  "(aucun modele de reference)")
+    if state != "ok":
+        return "impossible", f"validation impossible : etat du modele en service '{state}' ({detail})"
+    problems = ml_model.check_bundle_compat(candidate_bundle)
+    if problems:
+        return "impossible", f"validation impossible : candidat incompatible ({'; '.join(problems)})"
+
+    input_path = ev.latest_campaign_input()
+    if input_path is None:
+        return "impossible", ("validation impossible : aucune campagne d'evaluation "
+                              "(campaign_*/ground_truth)")
+    windows = ev.load_windows(Path(input_path))
     if not windows:
-        return True, "validation eval : pas de jeu de validation -> autorisee"
-    current = ml_model.load_latest()
-    if current is None:
-        return True, "validation eval : premier modele -> pas de reference"
+        return "impossible", f"validation impossible : aucune fenetre d'injection dans {input_path}"
 
     since = min(w.injected_at for w in windows) - ev.PAD
     until = max(w.cleared_at for w in windows) + ev.PAD
     by_ep = ev.load_features_span(conn, since, until)
+    covered = _windows_with_data(windows, by_ep)
+    if covered == 0:
+        return "impossible", (f"validation impossible : aucune mesure dans les fenetres "
+                              f"d'injection de {input_path}")
     exact, fallback = load_baseline_lookup(conn)
 
     r_cand, fp_cand = _recall_fp(ev, windows, by_ep, exact, fallback, candidate_bundle)
@@ -231,9 +280,32 @@ def validate_promotion(conn, candidate_bundle):
     recall_ok = r_cand >= r_cur - RECALL_TOLERANCE
     fp_ok = fp_cand <= fp_cur + max(FP_TOLERANCE_ABS, int(fp_cur * FP_TOLERANCE_REL))
     ok = recall_ok and fp_ok
-    report = (f"validation eval : recall {r_cur:.2f}->{r_cand:.2f}, FP {fp_cur}->{fp_cand} -> "
+    report = (f"validation ({input_path}, {covered}/{len(windows)} fenetres avec mesures) : "
+              f"recall {r_cur:.2f}->{r_cand:.2f}, FP {fp_cur}->{fp_cand} -> "
               + ("OK" if ok else "REGRESSION"))
-    return ok, report
+    return ("ok" if ok else "regression"), report
+
+
+def run_validation(conn, candidate_bundle, store=None):
+    """validate_promotion, une erreur donnant le statut 'impossible' (jamais une reussite)."""
+    try:
+        return validate_promotion(conn, candidate_bundle, store)
+    except Exception as e:
+        return "impossible", f"validation impossible (erreur : {e})"
+
+
+def decide_promotion(ok_gate, val_status, fresh, force):
+    """
+    (promouvoir, raisons_du_refus). Promotion si sanity-gate, validation
+    (ok ou initialisation) et fraicheur sont satisfaits ; --force (option manuelle,
+    jamais appliquee automatiquement) passe outre.
+    """
+    reasons = [name for name, ok in (
+        ("sanity-gate", ok_gate),
+        (f"validation-{val_status}", val_status in PROMOTABLE_VALIDATION),
+        ("fraicheur", fresh),
+    ) if not ok]
+    return (not reasons) or force, reasons
 
 
 def train_and_maybe_promote(conn, args):
@@ -251,6 +323,23 @@ def train_and_maybe_promote(conn, args):
         log.error(f"Trop peu d'echantillons ({len(X)} < {MIN_TRAIN_SAMPLES}) -- entrainement annule")
         return False
 
+    # --- Etat du depot de modeles, AVANT toute ecriture (ensure_reference et
+    # save_artifact creent le dossier). Seuls "absent" (1er modele) et "ok"
+    # permettent de continuer ; tout etat douteux arrete le cycle sans rien ecrire,
+    # --force compris.
+    store = ml_model.model_store_state()
+    store_state, _current, store_detail = store
+    if store_state not in ("absent", "ok"):
+        log.error(f"Depot de modeles '{store_state}' : {store_detail} -- cycle arrete, aucune ecriture")
+        return False
+    if store_state == "ok" and not os.path.exists(ml_model.reference_path()):
+        log.error("Modele en service sans fenetre de reference -- cycle arrete, aucune ecriture")
+        return False
+    prev_state, previous, prev_detail = ml_model.load_previous_versioned_state()
+    if store_state == "ok" and prev_state != "ok":
+        log.error(f"Artefact precedent '{prev_state}' : {prev_detail} -- cycle arrete, aucune ecriture")
+        return False
+
     model = ml_model.train(X, contamination=args.contamination)
     raw = ml_model.raw_anomaly(model, X)
     calib = ml_model.calibration_params(raw)
@@ -259,20 +348,29 @@ def train_and_maybe_promote(conn, args):
     meta = ml_model.build_meta(trained_at, X, args.contamination, WINDOW_SIZE, args.lookback_days)
     meta["calibration"] = calib
 
+    # Candidat incompatible avec le code actuel : arret sans ecriture, --force compris.
+    problems = ml_model.check_bundle_compat({"model": model, "meta": meta})
+    if problems:
+        log.error(f"Candidat incompatible ({'; '.join(problems)}) -- cycle arrete, aucune ecriture")
+        return False
+
     # --- Garde-fous de promotion (dans l'ordre) ---
-    # 1. Sanity gate : shift de distribution des scores vs modele precedent.
-    reference = ml_model.ensure_reference(X)
-    previous = ml_model.load_previous_versioned()
-    ok_gate, gate_report = ml_model.sanity_gate(model, previous, reference)
+    # 1. Sanity gate : shift de distribution des scores vs modele precedent
+    #    (strict des qu'un modele existe : pas de reussite par defaut).
+    try:
+        reference = ml_model.ensure_reference(X)
+    except ml_model.ReferenceWindowError as e:
+        log.error(f"{e} -- cycle arrete, aucune ecriture")
+        return False
+    ok_gate, gate_report = ml_model.sanity_gate(model, previous, reference,
+                                                strict=(store_state == "ok"))
     log.info(f"Sanity gate : {gate_report['reason']}")
 
     # 2. Validation d'eval : le candidat ne doit pas degrader la detection.
     candidate = {"model": model, "meta": meta}
-    try:
-        ok_val, val_report = validate_promotion(conn, candidate)
-    except Exception as e:
-        ok_val, val_report = True, f"validation eval sautee (erreur: {e})"
-    log.info(val_report)
+    val_status, val_report = run_validation(conn, candidate, store)
+    (log.info if val_status == "ok" else log.warning)(val_report)
+    meta["validation"] = {"status": val_status, "report": val_report}
 
     # 3. Fraicheur : ne pas promouvoir un modele entraine sur des donnees stale.
     age = data_freshness_hours(conn)
@@ -281,16 +379,16 @@ def train_and_maybe_promote(conn, args):
         log.warning(f"Donnees stale (derniere feature il y a {age:.1f}h > {MAX_DATA_AGE_HOURS}h)")
 
     if args.dry_run:
-        log.info(f"--dry-run : aucun artefact ecrit (gate={ok_gate} eval={ok_val} fresh={fresh})")
+        log.info(f"--dry-run : aucun artefact ecrit (gate={ok_gate} validation={val_status} fresh={fresh})")
         return True
 
-    promote = (ok_gate and ok_val and fresh) or args.force
+    promote, reasons = decide_promotion(ok_gate, val_status, fresh, args.force)
     if not promote:
-        reasons = [r for r, ok in (("sanity-gate", ok_gate), ("validation-eval", ok_val),
-                                   ("fraicheur", fresh)) if not ok]
         log.warning(f"Promotion REFUSEE ({', '.join(reasons)}) -- artefact conserve, latest inchange")
-    elif args.force and not (ok_gate and ok_val and fresh):
-        log.warning("Garde-fous non satisfaits mais --force : promotion forcee")
+    elif reasons:
+        log.warning(f"Garde-fous non satisfaits ({', '.join(reasons)}) mais --force : promotion forcee")
+    elif val_status == "initialisation":
+        log.warning("Promotion INITIALE du premier modele : initialisation, NON validee")
 
     path = ml_model.save_artifact(model, meta, promote=promote)
     if not promote:

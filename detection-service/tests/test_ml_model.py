@@ -116,3 +116,182 @@ def test_build_meta_contient_feature_names(trained):
     assert meta["feature_names"] == FEATURE_NAMES
     assert meta["n_samples"] == len(X)
     assert len(meta["feature_medians"]) == len(FEATURE_NAMES)
+
+
+# --- compatibilite d'un bundle (R5) -----------------------------------------
+
+def _bundle(model, X):
+    meta = ml_model.build_meta("2026-01-01T00:00:00+00:00", X, 0.05, 10, 14)
+    meta["calibration"] = ml_model.calibration_params(ml_model.raw_anomaly(model, X))
+    return {"model": model, "meta": meta}
+
+
+def test_compat_bundle_conforme(trained):
+    assert ml_model.check_bundle_compat(_bundle(*trained)) == []
+
+
+def test_compat_ordre_des_features_different(trained):
+    b = _bundle(*trained)
+    b["meta"]["feature_names"] = list(reversed(FEATURE_NAMES))
+    assert any("ordre" in p for p in ml_model.check_bundle_compat(b))
+
+
+def test_compat_noms_et_nombre_differents(trained):
+    b = _bundle(*trained)
+    b["meta"]["feature_names"] = FEATURE_NAMES[:-1] + ["inconnue"]
+    assert ml_model.check_bundle_compat(b)
+    b["meta"]["feature_names"] = FEATURE_NAMES[:-1]
+    assert ml_model.check_bundle_compat(b)
+
+
+def test_compat_n_features_in_different():
+    X6 = np.random.default_rng(1).normal(size=(100, len(FEATURE_NAMES) - 1))
+    model6 = ml_model.train(X6, contamination=0.05)
+    X = np.random.default_rng(1).normal(size=(100, len(FEATURE_NAMES)))
+    b = _bundle(ml_model.train(X, contamination=0.05), X)
+    b["model"] = model6
+    assert any("n_features_in_" in p for p in ml_model.check_bundle_compat(b))
+
+
+@pytest.mark.parametrize("calib", [None, {}, {"p50": 0.3}, {"p50": 0.3, "p99": float("nan")}])
+def test_compat_calibration_invalide(trained, calib):
+    b = _bundle(*trained)
+    if calib is None:
+        del b["meta"]["calibration"]
+    else:
+        b["meta"]["calibration"] = calib
+    assert any("calibration" in p for p in ml_model.check_bundle_compat(b))
+
+
+def test_compat_medianes_invalides(trained):
+    b = _bundle(*trained)
+    b["meta"]["feature_medians"] = b["meta"]["feature_medians"][:-1]
+    assert any("feature_medians" in p for p in ml_model.check_bundle_compat(b))
+    b["meta"]["feature_medians"] = [float("inf")] * len(FEATURE_NAMES)
+    assert any("feature_medians" in p for p in ml_model.check_bundle_compat(b))
+
+
+@pytest.mark.parametrize("bundle", [None, [], {"model": object()}, {"meta": {}}])
+def test_compat_structure_invalide(bundle):
+    assert ml_model.check_bundle_compat(bundle)
+
+
+# --- etat du depot de modeles (R1) : diagnostic sans ecriture ---------------
+
+@pytest.fixture
+def store(tmp_path, monkeypatch):
+    d = tmp_path / "models"
+    d.mkdir()
+    monkeypatch.setattr(ml_model, "MODEL_DIR", str(d))
+    return d
+
+
+def _listing(d):
+    return sorted(p.name for p in d.iterdir()) if d.exists() else None
+
+
+def test_etat_dossier_absent_et_non_cree(tmp_path, monkeypatch):
+    d = tmp_path / "inexistant"
+    monkeypatch.setattr(ml_model, "MODEL_DIR", str(d))
+    assert ml_model.model_store_state()[0] == "dossier_absent"
+    assert not d.exists()
+
+
+def test_etat_absent_si_dossier_vide(store):
+    state, bundle, _ = ml_model.model_store_state()
+    assert (state, bundle) == ("absent", None)
+
+
+def test_etat_incoherent_artefacts_sans_latest(store):
+    (store / "iforest_20260101_000000.joblib").write_bytes(b"x")
+    assert ml_model.model_store_state()[0] == "incoherent"
+
+
+def test_etat_incoherent_reference_sans_modele(store):
+    np.save(store / ml_model.REFERENCE_NAME, np.zeros((5, len(FEATURE_NAMES))))
+    assert ml_model.model_store_state()[0] == "incoherent"
+
+
+def test_etat_illisible_latest_corrompu(store):
+    (store / ml_model.LATEST_NAME).write_bytes(b"ceci n'est pas un joblib")
+    assert ml_model.model_store_state()[0] == "illisible"
+
+
+def test_etat_illisible_latest_pas_un_bundle(store):
+    import joblib
+    joblib.dump([1, 2, 3], store / ml_model.LATEST_NAME)
+    assert ml_model.model_store_state()[0] == "illisible"
+
+
+def test_etat_incompatible(store, trained):
+    import joblib
+    b = _bundle(*trained)
+    b["meta"]["feature_names"] = list(reversed(FEATURE_NAMES))
+    joblib.dump(b, store / ml_model.LATEST_NAME)
+    assert ml_model.model_store_state()[0] == "incompatible"
+
+
+def test_etat_ok_et_diagnostic_sans_ecriture(store, trained):
+    import joblib
+    joblib.dump(_bundle(*trained), store / ml_model.LATEST_NAME)
+    avant = _listing(store)
+    state, bundle, _ = ml_model.model_store_state()
+    assert state == "ok" and bundle is not None
+    assert _listing(store) == avant
+
+
+def test_etat_erreur_si_lecture_du_dossier_echoue(store, monkeypatch):
+    def refus(_):
+        raise PermissionError("acces refuse")
+    monkeypatch.setattr(ml_model.os, "listdir", refus)
+    assert ml_model.model_store_state()[0] == "erreur"
+
+
+# --- artefact precedent et fenetre de reference -----------------------------
+
+def test_precedent_aucun(store):
+    assert ml_model.load_previous_versioned_state()[0] == "aucun"
+
+
+def test_precedent_illisible(store):
+    (store / "iforest_20260101_000000.joblib").write_bytes(b"corrompu")
+    assert ml_model.load_previous_versioned_state()[0] == "illisible"
+
+
+def test_precedent_ok(store, trained):
+    import joblib
+    joblib.dump(_bundle(*trained), store / "iforest_20260101_000000.joblib")
+    state, bundle, _ = ml_model.load_previous_versioned_state()
+    assert state == "ok" and "model" in bundle
+
+
+def test_reference_corrompue_erreur_explicite(store, trained):
+    (store / ml_model.REFERENCE_NAME).write_bytes(b"corrompu")
+    with pytest.raises(ml_model.ReferenceWindowError):
+        ml_model.ensure_reference(trained[1])
+
+
+def test_reference_mauvaise_forme_erreur_explicite(store, trained):
+    np.save(store / ml_model.REFERENCE_NAME, np.zeros((5, len(FEATURE_NAMES) + 1)))
+    with pytest.raises(ml_model.ReferenceWindowError):
+        ml_model.ensure_reference(trained[1])
+
+
+# --- sanity gate strict (R9 partiel) ----------------------------------------
+
+def test_sanity_gate_strict_refuse_sans_reference(trained):
+    model, X = trained
+    ok, report = ml_model.sanity_gate(model, None, X[:50], strict=True)
+    assert ok is False
+
+
+def test_sanity_gate_strict_refuse_fenetre_vide(trained):
+    model, X = trained
+    ok, _ = ml_model.sanity_gate(model, {"model": model}, X[:0], strict=True)
+    assert ok is False
+
+
+def test_sanity_gate_strict_compare_normalement(trained):
+    model, X = trained
+    ok, report = ml_model.sanity_gate(model, {"model": model}, X[:50], strict=True)
+    assert ok is True and report["ks"] == pytest.approx(0.0, abs=1e-9)

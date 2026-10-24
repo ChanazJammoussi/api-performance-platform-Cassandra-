@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Optional
 
 import psycopg2
+import psycopg2.extras
 import yaml
 from dotenv import find_dotenv, load_dotenv
 
@@ -39,6 +40,13 @@ EVALUATION    = DETECTION_DIR / "evaluation.py"
 
 sys.path.insert(0, str(SUITE_DIR))
 from runner import PROMETHEUS_RESIDUE_WINDOW  # noqa: E402  (source de vérité unique)
+
+# Controles d'integrite des campagnes (bibliotheque standard uniquement). Ajoute en
+# FIN de sys.path pour ne masquer aucun module du scenario-runner.
+sys.path.append(str(DETECTION_DIR))
+import validation_checks as vc  # noqa: E402
+
+FEATURES_PY = DETECTION_DIR / "features.py"
 
 GUARD_POLL    = 30   # secondes entre sondages de la garde DB
 GUARD_TIMEOUT = 600  # secondes max avant abandon de la garde DB
@@ -230,20 +238,13 @@ def run_runner(
 # ── Ground truth ─────────────────────────────────────────────────────────────
 
 def verify_ground_truth(gt_file: Path) -> tuple[bool, str]:
+    """Controle strict (validation_checks) : fichier, champs, dates, fin non future."""
     if not gt_file.exists():
         return False, f"fichier absent : {gt_file.name}"
-    try:
-        with open(gt_file) as f:
-            data = json.load(f)
-    except json.JSONDecodeError as e:
-        return False, f"JSON invalide : {e}"
-    faults = data.get("faults", []) if isinstance(data, dict) else data
-    if not faults:
-        return False, "aucune fault enregistrée"
-    missing = [i for i, fault in enumerate(faults) if "cleared_at" not in fault]
-    if missing:
-        return False, f"cleared_at absent sur fault(s) {missing}"
-    return True, f"{len(faults)} fault(s) vérifiée(s)"
+    windows, reasons = vc.check_ground_truth_file(gt_file)
+    if reasons:
+        return False, " ; ".join(reasons)
+    return True, f"{len(windows)} fault(s) vérifiée(s)"
 
 
 def cleared_at_from_gt(gt_file: Path) -> Optional[datetime]:
@@ -405,12 +406,37 @@ class BenchmarkSuite:
             self.entries = json.load(f)
         self.campaign_dir = latest_json.parent
         self.campaign_id = self.campaign_dir.name
-        ok_count = sum(1 for e in self.entries if e.get("status") in ("ok", "ok_no_metrics"))
+        ok_count = sum(1 for e in self.entries if e.get("status") == "ok")
         log(f"[RESUME] Reprise de {self.campaign_id} "
             f"({len(self.entries)} entrées, {ok_count} succès)")
 
+    def _snapshot_baseline(self) -> tuple[str, int]:
+        """
+        Instantane de endpoint_baseline (lecture seule) dans le dossier de campagne,
+        avant toute injection. Renvoie (empreinte, nombre de lignes). Tout echec
+        interrompt la campagne avant la premiere injection.
+        """
+        conn = db_conn(self.config)
+        try:
+            conn.set_session(readonly=True)
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT endpoint_id, metric, dow, hour_bucket, p10, p50, p90,
+                           sample_count, updated_at
+                    FROM endpoint_baseline
+                    ORDER BY endpoint_id, metric, dow, hour_bucket
+                """)
+                rows = [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+        fingerprint = vc.write_baseline_snapshot(self.campaign_dir, rows, utc_now())
+        return fingerprint, len(rows)
+
     def _write_manifest(self, scenarios: list[Path]) -> dict:
+        feature_names = vc.extract_feature_names(FEATURES_PY)
+        baseline_fp, baseline_rows = self._snapshot_baseline()
         manifest = {
+            "manifest_format": 2,
             "campaign_id": self.campaign_id,
             "started_at": iso(utc_now()),
             "commit_sha": get_commit_sha(),
@@ -419,6 +445,12 @@ class BenchmarkSuite:
             "min_core_duration": self.args.min_core_duration,
             "prometheus_window": self.args.prometheus_window,
             "scenarios": [p.stem for p in scenarios],
+            "tiers": list(vc.TIERS),
+            "feature_names": feature_names,
+            "feature_fingerprint": vc.feature_fingerprint(feature_names),
+            "baseline_snapshot": vc.BASELINE_SNAPSHOT_NAME,
+            "baseline_fingerprint": baseline_fp,
+            "baseline_row_count": baseline_rows,
         }
         (self.campaign_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
         return manifest
@@ -426,10 +458,12 @@ class BenchmarkSuite:
     # ── Exécution d'un tier (core ou stress) ───────────────────────────────────
 
     def _already_done(self, scenario_name: str, tier: str) -> bool:
+        # Seul "ok" est une execution reussie : ok_no_metrics (evaluation sans
+        # chiffres) est rejoue a la reprise.
         return any(
             e["scenario"] == scenario_name
             and e["tier"] == tier
-            and e.get("status") in ("ok", "ok_no_metrics")
+            and e.get("status") == "ok"
             for e in self.entries
         )
 
@@ -618,7 +652,7 @@ class BenchmarkSuite:
 
     def _print_final_verification(self, scenarios: list[Path]) -> None:
         expected = len(scenarios) * 2
-        ok_entries   = [e for e in self.entries if e.get("status") in ("ok", "ok_no_metrics")]
+        ok_entries   = [e for e in self.entries if e.get("status") == "ok"]
         err_entries  = [e for e in self.entries if e.get("status") == "error"]
         complete = len(ok_entries) == expected
 
@@ -644,6 +678,17 @@ class BenchmarkSuite:
             exists = (self.campaign_dir / fname).exists()
             print(f"    {'[OK]' if exists else '[--]'}  {fname}")
         print(f"  Dossier : {self.campaign_dir}")
+        print("=" * 65)
+
+        # Finalisation officielle : completed_at n'est ecrit que si TOUS les
+        # controles d'integrite passent (validation_checks.check_campaign).
+        finalized, reasons = vc.finalize_campaign(self.campaign_dir, features_py=FEATURES_PY)
+        if finalized:
+            print("  Campagne FINALISEE : completed_at ecrit dans manifest.json")
+        else:
+            print("  Campagne NON finalisee (pas de completed_at) :")
+            for r in reasons:
+                print(f"    - {r}")
         print("=" * 65)
 
 

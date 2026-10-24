@@ -77,6 +77,7 @@ def load_injection_windows():
 # Metriques a calculer et la colonne source correspondante dans endpoint_features
 METRICS = {
     "p99_ms":         "p99_ms",
+    "p95_ms":         "p95_ms",   # requis par features (baseline_dev_p95) et ML_METRICS
     "p50_ms":         "p50_ms",
     "rps":            "rps",
     "error_rate_5xx": "error_rate_5xx",

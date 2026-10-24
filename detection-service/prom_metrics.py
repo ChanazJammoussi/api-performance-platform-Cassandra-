@@ -34,6 +34,9 @@ except Exception:  # pragma: no cover - chemin de repli
         def observe(self, *a, **k):
             pass
 
+        def clear(self, *a, **k):
+            pass
+
     def Counter(*a, **k):    # noqa: N802
         return _Noop()
 
@@ -63,6 +66,43 @@ LLM_CALLS = Counter(
     "cassandra_llm_calls_total", "Appels au LLM par resultat", labelnames=["result"])
 SCRAPE_FRESHNESS = Gauge(
     "cassandra_scrape_freshness_seconds", "Age de la derniere feature scrapee (s)")
+
+# Identite du modele REELLEMENT charge par le detecteur (lot 2b-5). Aucun chemin local.
+MODEL_INFO = Gauge(
+    "cassandra_model_info", "Modele actif dans le detecteur (1 = actif)",
+    labelnames=["sha256", "trained_at", "feature_fingerprint"])
+MODEL_STATE = Gauge(
+    "cassandra_model_state", "Etat du modele dans le detecteur (1 = etat courant)",
+    labelnames=["state"])
+MODEL_LOADS = Counter(
+    "cassandra_model_load_total", "Tentatives de chargement du modele par resultat",
+    labelnames=["result"])
+MODEL_STATES = ("actif", "aucun_modele_actif", "actif_dernier_chargement_refuse",
+                "aucun_modele_dernier_chargement_refuse")
+
+
+def model_state_label(identity):
+    """Etat publie : actif / aucun modele, avec ou sans dernier chargement refuse."""
+    base = "actif" if identity.get("statut") == "actif" else "aucun_modele"
+    if "dernier_chargement_refuse" in identity:
+        return f"{base}_dernier_chargement_refuse"
+    return "actif" if base == "actif" else "aucun_modele_actif"
+
+
+def publish_model(identity, result=None):
+    """
+    Publie l'identite du modele actif (serie unique, l'ancienne est effacee) et son
+    etat. result : resultat de la derniere tentative de chargement (compteur).
+    """
+    MODEL_INFO.clear()
+    if identity.get("statut") == "actif":
+        MODEL_INFO.labels(sha256=identity["sha256"], trained_at=str(identity.get("trained_at")),
+                          feature_fingerprint=str(identity.get("feature_fingerprint"))).set(1)
+    current = model_state_label(identity)
+    for st in MODEL_STATES:
+        MODEL_STATE.labels(state=st).set(1 if st == current else 0)
+    if result is not None:
+        MODEL_LOADS.labels(result=result).inc()
 
 
 def start_metrics_server(default_port=9101):

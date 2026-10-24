@@ -8,7 +8,9 @@ Responsabilites :
   - calibrate()        : mappe le score brut vers [0,1] via la distribution trailing
   - attribute()        : contribution par feature (ablation sur le score) -> top-3
   - save_artifact()    : ecrit un artefact horodate + promeut le pointeur "latest"
-  - load_latest()      : charge l'artefact promu (best-effort)
+  - load_latest()      : charge l'artefact promu (best-effort, detecteur)
+  - model_store_state(): etat du depot de modeles pour la promotion (strict, sans ecriture)
+  - check_bundle_compat(): compatibilite d'un artefact avec FEATURE_NAMES
   - sanity_gate()      : verifie un shift de distribution sur une fenetre de reference
 
 Format artefact (joblib) : {"model": IsolationForest, "meta": {...}}.
@@ -184,16 +186,137 @@ def load_previous_versioned():
         return None
 
 
+def load_previous_versioned_state():
+    """
+    Comme load_previous_versioned, mais distingue l'absence d'artefact d'un artefact
+    illisible : (etat, bundle|None, detail), etat in {"aucun", "illisible", "ok"}.
+    """
+    versions = sorted(glob.glob(os.path.join(MODEL_DIR, "iforest_2*.joblib")))
+    if not versions:
+        return "aucun", None, "aucun artefact horodate"
+    name = os.path.basename(versions[-1])
+    try:
+        bundle = joblib.load(versions[-1])
+    except Exception as e:
+        return "illisible", None, f"{name} : chargement echoue ({e})"
+    if not isinstance(bundle, dict) or "model" not in bundle:
+        return "illisible", None, f"{name} : structure {{model, meta}} attendue"
+    return "ok", bundle, name
+
+
+# ---------------------------------------------------------------------------
+# Etat du depot de modeles et compatibilite (promotion uniquement)
+# ---------------------------------------------------------------------------
+# Le detecteur garde load_latest() (best-effort). La promotion, elle, exige un
+# diagnostic strict : seule une absence REELLE de tout modele autorise
+# l'initialisation ; tout etat douteux bloque.
+
+def _finite(v):
+    try:
+        return bool(np.isfinite(float(v)))
+    except (TypeError, ValueError):
+        return False
+
+
+def check_bundle_compat(bundle):
+    """
+    Liste des problemes de compatibilite d'un artefact {model, meta} avec le code
+    actuel (vide = compatible) : feature_names identiques a FEATURE_NAMES (noms ET
+    ordre), model.n_features_in_, calibration p50/p99 finie, feature_medians.
+    """
+    if not isinstance(bundle, dict) or "model" not in bundle or "meta" not in bundle:
+        return ["structure : dict {model, meta} attendu"]
+    model, meta = bundle["model"], bundle["meta"]
+    if not isinstance(meta, dict):
+        return ["meta : dict attendu"]
+    problems = []
+    names = meta.get("feature_names")
+    if names is None:
+        problems.append("meta.feature_names absent")
+    elif list(names) != list(FEATURE_NAMES):
+        if sorted(names) == sorted(FEATURE_NAMES):
+            problems.append("meta.feature_names : ordre different de FEATURE_NAMES")
+        else:
+            problems.append(f"meta.feature_names differents de FEATURE_NAMES : {list(names)}")
+    n_in = getattr(model, "n_features_in_", None)
+    if n_in != len(FEATURE_NAMES):
+        problems.append(f"model.n_features_in_={n_in} != {len(FEATURE_NAMES)}")
+    calib = meta.get("calibration")
+    if not isinstance(calib, dict) or not all(_finite(calib.get(k)) for k in ("p50", "p99")):
+        problems.append("meta.calibration : p50 et p99 finis requis")
+    medians = meta.get("feature_medians")
+    try:
+        medians_ok = len(medians) == len(FEATURE_NAMES) and all(_finite(v) for v in medians)
+    except TypeError:
+        medians_ok = False
+    if not medians_ok:
+        problems.append(f"meta.feature_medians : {len(FEATURE_NAMES)} valeurs finies requises")
+    return problems
+
+
+def model_store_state():
+    """
+    Diagnostic du depot de modeles, SANS ecriture : (etat, bundle|None, detail).
+      absent         : dossier present et lisible, aucun iforest_*.joblib ni
+                       fenetre de reference -> seule situation d'initialisation
+      ok             : latest charge et compatible
+      dossier_absent : MODEL_DIR introuvable (ex. volume non monte)
+      erreur         : MODEL_DIR non lisible, ou erreur inattendue
+      incoherent     : pas de latest mais d'autres artefacts / une reference
+      illisible      : latest present mais non chargeable ou mal structure
+      incompatible   : latest charge mais incompatible (check_bundle_compat)
+    """
+    try:
+        if not os.path.exists(MODEL_DIR):
+            return "dossier_absent", None, f"{MODEL_DIR} introuvable"
+        if not os.path.isdir(MODEL_DIR):
+            return "erreur", None, f"{MODEL_DIR} n'est pas un dossier"
+        names = os.listdir(MODEL_DIR)
+    except Exception as e:
+        return "erreur", None, f"lecture de {MODEL_DIR} impossible : {e}"
+
+    artefacts = sorted(n for n in names if n.startswith("iforest_") and n.endswith(".joblib"))
+    if LATEST_NAME not in names:
+        if not artefacts and REFERENCE_NAME not in names:
+            return "absent", None, "aucun modele ni fenetre de reference"
+        presents = artefacts + ([REFERENCE_NAME] if REFERENCE_NAME in names else [])
+        return "incoherent", None, f"{LATEST_NAME} absent mais presents : {presents}"
+
+    try:
+        bundle = joblib.load(latest_path())
+    except Exception as e:
+        return "illisible", None, f"chargement de {LATEST_NAME} echoue : {e}"
+    if not isinstance(bundle, dict) or "model" not in bundle or "meta" not in bundle:
+        return "illisible", None, f"{LATEST_NAME} : structure {{model, meta}} attendue"
+    problems = check_bundle_compat(bundle)
+    if problems:
+        return "incompatible", None, "; ".join(problems)
+    return "ok", bundle, "modele en service charge et compatible"
+
+
+class ReferenceWindowError(Exception):
+    """Fenetre de reference existante mais illisible ou mal formee."""
+
+
 def ensure_reference(X, size=500, random_state=42):
     """
     Fenetre de reference FIXE pour le sanity gate (spec 8.3). Creee au 1er
     entrainement a partir d'un echantillon deterministe de X, puis figee (jamais
     reecrite) pour que les comparaisons de distribution soient stables dans le temps.
-    Retourne la matrice de reference.
+    Retourne la matrice de reference. Une reference existante illisible ou mal
+    formee leve ReferenceWindowError (jamais recreee en silence).
     """
     path = reference_path()
     if os.path.exists(path):
-        return np.load(path)
+        try:
+            ref = np.load(path)
+        except Exception as e:
+            raise ReferenceWindowError(f"fenetre de reference illisible ({path}) : {e}") from e
+        if ref.ndim != 2 or ref.shape[1] != len(FEATURE_NAMES):
+            raise ReferenceWindowError(
+                f"fenetre de reference mal formee ({path}) : forme {ref.shape}, "
+                f"{len(FEATURE_NAMES)} colonnes attendues")
+        return ref
     os.makedirs(MODEL_DIR, exist_ok=True)
     X = np.asarray(X, dtype=float)
     n = min(size, len(X))
@@ -215,19 +338,27 @@ def _ks_statistic(a, b):
     return float(np.max(np.abs(cdf_a - cdf_b)))
 
 
-def sanity_gate(new_model, previous_bundle, reference_X):
+def sanity_gate(new_model, previous_bundle, reference_X, strict=False):
     """
     Sanity gate avant promotion (spec 8.3) : compare la distribution de scores du
     nouveau modele a celle de l'ancien, sur la fenetre de reference fixe.
 
     Retourne (ok: bool, report: dict). Si aucun modele precedent : promotion
     autorisee (premier modele). Sinon on refuse si le KS depasse SANITY_KS_MAX.
+    strict=True (un modele existe deja) : reference absente/illisible ou fenetre
+    vide -> refus, jamais de reussite par defaut.
     """
     report = {"ks": None, "threshold": SANITY_KS_MAX, "reason": ""}
     if previous_bundle is None:
+        if strict:
+            report["reason"] = "modele de reference absent ou illisible -> promotion REFUSEE"
+            return False, report
         report["reason"] = "premier modele (pas de reference precedente)"
         return True, report
     if reference_X is None or len(reference_X) == 0:
+        if strict:
+            report["reason"] = "fenetre de reference vide -> promotion REFUSEE"
+            return False, report
         report["reason"] = "fenetre de reference vide -> promotion par defaut"
         return True, report
 
