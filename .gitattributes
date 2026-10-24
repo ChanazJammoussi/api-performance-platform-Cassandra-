@@ -1,0 +1,4 @@
+# Fins de ligne : les scripts Bash restent en LF (executes sous Linux et dans les conteneurs)
+*.sh text eol=lf
+# PDF : aucune conversion de fins de ligne (sinon fichier corrompu)
+*.pdf binary
