@@ -13,9 +13,10 @@ from correlator import (
 )
 from explainer import generate_explanation
 from baseline_utils import (
-    get_baseline, get_baselines, compute_deviation, pg_dow,
+    get_baseline, get_baselines, compute_deviation,
     ENDPOINT_SLOS, DEFAULT_SLOS,
 )
+import season
 from features import compute_features, vectorize, direction_of, WINDOW_SIZE, MIN_WINDOW
 from ttd import estimate_ttd
 import ml_model
@@ -75,6 +76,49 @@ RESOLVING_WINDOWS = 2  # cycles avant OK
 FIRE_THRESHOLD = 0.6
 # Metriques dont la couche ML a besoin de la baseline saisonniere.
 ML_METRICS = ["p50_ms", "p95_ms", "p99_ms", "rps"]
+
+# Watermark du detecteur en direct (spec 5.2) : une mesure du scraper est complete
+# des son ecriture (requete instantanee sur une fenetre close de 5 min). Elle est
+# traitee UNE seule fois ; une mesure plus vieille que MAX_FEATURE_AGE_S n'est pas
+# traitee et l'automate d'alertes n'avance pas sans nouvelle mesure (comme le rejeu
+# hors ligne, qui compte M_WINDOWS en mesures).
+MAX_FEATURE_AGE_S = 180
+# Derniere mesure traitee par endpoint (time de endpoint_features), mise a jour
+# apres le commit du cycle ; initialisee au demarrage depuis l'anomaly store.
+_LAST_SCORED = {}
+_STALE_LOGGED = set()
+
+
+def select_fresh(rows, last_scored, now, max_age_s=MAX_FEATURE_AGE_S):
+    """
+    Tri des dernieres mesures (endpoint_id, p99, err5xx, time) -> (a_traiter,
+    perimees, deja_traitees). Fonction pure.
+      deja_traitees : time <= derniere mesure traitee pour cet endpoint
+      perimees      : age (now - time) > max_age_s, jamais traitees
+      a_traiter     : le reste (une seule fois par mesure)
+    """
+    fresh, stale, done = [], [], []
+    for row in rows:
+        endpoint_id, ts = row[0], row[3]
+        last = last_scored.get(endpoint_id)
+        if last is not None and ts <= last:
+            done.append(row)
+        elif (now - ts).total_seconds() > max_age_s:
+            stale.append(row)
+        else:
+            fresh.append(row)
+    return fresh, stale, done
+
+
+def load_last_scored(cur):
+    """{endpoint: derniere window_start ecrite} (anomaly store) : reprise apres redemarrage."""
+    cur.execute("""
+        SELECT endpoint_id, max(window_start)
+        FROM anomalies
+        WHERE signal_type = 'p99_ms'
+        GROUP BY endpoint_id
+    """)
+    return {ep: ts for ep, ts in cur.fetchall() if ts is not None}
 
 # Modele ML reellement charge par CE processus (identite = SHA-256 des octets charges),
 # recharge quand l'artefact latest change (retrain nightly). Un artefact illisible ou
@@ -241,7 +285,7 @@ def set_ok(cur, endpoint_id, signal_type, now):
         WHERE endpoint_id = %s AND signal_type = %s
     """, (now, now, endpoint_id, signal_type))
 
-def process_signal(cur, endpoint_id, signal_type, anomaly, severity, score, raw_value, layer, now, expected_states=None, p99=None, err5xx=None, ttd=None):
+def process_signal(cur, endpoint_id, signal_type, anomaly, severity, score, raw_value, layer, now, expected_states=None, p99=None, err5xx=None, ttd=None, measured_at=None):
     row = get_alert_state(cur, endpoint_id, signal_type)
     current_state = row[0] if row else "ok"
     pending_count = row[1] if row else 0
@@ -286,7 +330,8 @@ def process_signal(cur, endpoint_id, signal_type, anomaly, severity, score, raw_
                 # --- explanation (LLM, avec fallback template interne) ---
                 explanation = None
                 try:
-                    explanation = generate_explanation(cur, endpoint_id, signal_type, now)
+                    explanation = generate_explanation(cur, endpoint_id, signal_type, now,
+                                                       measured_at=measured_at)
                     pm.LLM_CALLS.labels(result="fallback" if explanation.get("fallback") else "llm").inc()
                 except Exception as e:
                     pm.LLM_CALLS.labels(result="error").inc()
@@ -384,20 +429,31 @@ def ensure_schema(cur):
 
 def run_detection(conn):
     cur = conn.cursor()
+    # now = heure de DECISION (dates des alertes, correlation) ; la case de baseline
+    # vient de l'heure de la MESURE (ts), comme le rejeu hors ligne.
     now = datetime.now(timezone.utc)
-    dow = pg_dow(now)
-    hour = now.hour
     _expected_states = {}
     maybe_load_model()
     # Un seul instantane par cycle : le meme modele sert au calcul ET a la tracabilite.
     active_model = _MODEL.current()
     rows = get_latest_features(cur)
     pm.ENDPOINTS_WITH_FEATURES.set(len(rows))
-    for row in rows:
+    fresh, stale, _done = select_fresh(rows, _LAST_SCORED, now)
+    pm.ENDPOINTS_STALE.set(len(stale))
+    stale_eps = {r[0] for r in stale}
+    if stale_eps != _STALE_LOGGED:
+        if stale_eps:
+            log.warning(f"Mesures perimees (> {MAX_FEATURE_AGE_S}s), non traitees : {sorted(stale_eps)}")
+        _STALE_LOGGED.clear()
+        _STALE_LOGGED.update(stale_eps)
+    scored = {}
+    for row in fresh:
         endpoint_id, p99, err5xx, ts = row
+        scored[endpoint_id] = ts   # traitee une seule fois, meme inutilisable
 
         if p99 is None or (isinstance(p99, float) and math.isnan(p99)):
             continue
+        dow, hour = season.slot(ts)
 
         # --- Signal p99 : layer 0 (static) + layer 1 (baseline) + layer 2 (ML) ---
         baselines = get_baselines(cur, endpoint_id, ML_METRICS, dow, hour)
@@ -514,7 +570,7 @@ def run_detection(conn):
 
         process_signal(cur, endpoint_id, "p99_ms", anomaly, severity if anomaly else None,
                        combined if anomaly else 0.0, p99, layer, now, _expected_states,
-                       p99=p99, err5xx=err5xx, ttd=ttd)
+                       p99=p99, err5xx=err5xx, ttd=ttd, measured_at=ts)
 
         # Persiste les features contributives sur l'alerte (best-effort).
         if anomaly:
@@ -527,14 +583,16 @@ def run_detection(conn):
 
         if err5xx is not None and err5xx > slos["error_rate_5xx"]:
             err_score = (err5xx - slos["error_rate_5xx"]) / (slos["error_rate_5xx"] + 1e-6)
-            process_signal(cur, endpoint_id, "error_rate_5xx", True, "critical", err_score, err5xx, "static", now, _expected_states, p99=p99, err5xx=err5xx)
+            process_signal(cur, endpoint_id, "error_rate_5xx", True, "critical", err_score, err5xx, "static", now, _expected_states, p99=p99, err5xx=err5xx, measured_at=ts)
         else:
-            process_signal(cur, endpoint_id, "error_rate_5xx", False, None, 0.0, err5xx, None, now, _expected_states, p99=p99, err5xx=err5xx)
+            process_signal(cur, endpoint_id, "error_rate_5xx", False, None, 0.0, err5xx, None, now, _expected_states, p99=p99, err5xx=err5xx, measured_at=ts)
 
     audit_state_consistency(cur, _expected_states)
     _update_metrics_gauges(cur)
     conn.commit()
     cur.close()
+    # Apres le commit seulement : un cycle en erreur ne marque aucune mesure traitee.
+    _LAST_SCORED.update(scored)
 
 
 def _update_metrics_gauges(cur):
@@ -557,9 +615,15 @@ def run():
     cur = conn.cursor()
     ensure_schema(cur)
     conn.commit()
+    try:
+        _LAST_SCORED.update(load_last_scored(cur))
+    except Exception as e:
+        conn.rollback()
+        log.error(f"Reprise des mesures deja traitees impossible : {e}")
     cur.close()
     pm.start_metrics_server()
-    log.info("Detector started")
+    log.info(f"Detector started (mode saisonnier : {season.describe()}, "
+             f"{len(_LAST_SCORED)} endpoint(s) deja traites)")
     while True:
         try:
             t0 = time.monotonic()

@@ -899,3 +899,93 @@ def test_metric_coverage_refuse_date_sans_fuseau():
     with pytest.raises(ValueError):
         vc.metric_coverage([_win()], {"GET /orders": [_row(datetime(2026, 11, 1, 8, 1))]}, ["p99_ms"],
                            context_s=600, grace_s=120)
+
+
+# --- mode saisonnier (season.py) : campagnes et cases ----------------------------
+
+import season  # noqa: E402
+
+SEASON_C = {"mode": "compresse", "cycle_minutes": 120, "slot_minutes": 5}
+
+
+def _set_manifest_season(d, value):
+    def edit(m):
+        m["season"] = value
+    _edit_json(d / "manifest.json", edit)
+
+
+def _replace_snapshot(d, rows):
+    (d / vc.BASELINE_SNAPSHOT_NAME).unlink()
+    fp = vc.write_baseline_snapshot(d, rows, T0)
+
+    def edit(m):
+        m.update(baseline_fingerprint=fp, baseline_row_count=len(rows))
+    _edit_json(d / "manifest.json", edit)
+
+
+def test_campagne_historique_sans_mode_valide_en_mode_reel(tmp_path):
+    assert _check(make_campaign(tmp_path))["ok"]
+
+
+def test_campagne_sans_mode_refusee_en_mode_compresse(tmp_path, monkeypatch):
+    monkeypatch.setattr(season, "MODE", season.COMPRESSE)
+    assert _has(_check(make_campaign(tmp_path)), "mode saisonnier de la campagne")[0]
+
+
+def test_campagne_compressee_valide_en_mode_compresse(tmp_path, monkeypatch):
+    monkeypatch.setattr(season, "MODE", season.COMPRESSE)
+    d = make_campaign(tmp_path)
+    _set_manifest_season(d, SEASON_C)
+    r = _check(d)
+    assert r["ok"], r["reasons"]
+
+
+def test_campagne_compressee_refusee_en_mode_reel(tmp_path):
+    d = make_campaign(tmp_path)
+    _set_manifest_season(d, SEASON_C)
+    assert _has(_check(d), "different du mode actuel")[0]
+
+
+@pytest.mark.parametrize("value", ["compresse", {"mode": "hebdo"}, {}])
+def test_mode_de_campagne_invalide(tmp_path, value):
+    d = make_campaign(tmp_path)
+    _set_manifest_season(d, value)
+    assert _has(_check(d), "season invalide")[0]
+
+
+def test_melange_de_modes_dans_l_instantane(tmp_path, monkeypatch):
+    monkeypatch.setattr(season, "MODE", season.COMPRESSE)
+    d = make_campaign(tmp_path)
+    _set_manifest_season(d, SEASON_C)
+    _replace_snapshot(d, BASE_ROWS + [dict(BASE_ROWS[0], dow=3, hour_bucket=14)])
+    assert _has(_check(d), "incompatible(s) avec le mode saisonnier")[0]
+
+
+def test_finalisation_refusee_si_le_mode_a_change(tmp_path, monkeypatch):
+    d = make_campaign(tmp_path)                       # campagne lancee en mode reel
+    monkeypatch.setattr(season, "MODE", season.COMPRESSE)
+    ok, reasons = vc.finalize_campaign(d, now=NOW)
+    assert not ok and any("mode saisonnier" in r for r in reasons)
+    assert "completed_at" not in json.loads((d / "manifest.json").read_text(encoding="utf-8"))
+
+
+def test_creneaux_par_pas_de_5_minutes_en_mode_compresse(monkeypatch):
+    monkeypatch.setattr(season, "MODE", season.COMPRESSE)
+    start = datetime(2026, 11, 1, 8, 2, tzinfo=timezone.utc)      # heure simulee 0
+    assert vc._hour_slots(start, start + timedelta(minutes=11)) == [(0, 0), (0, 1), (0, 2)]
+
+
+def test_completude_baseline_mode_compresse(monkeypatch):
+    monkeypatch.setattr(season, "MODE", season.COMPRESSE)
+    w = {"source": "f.json", "target_endpoint": "GET /orders", "fault_type": "latency_step",
+         "injected": datetime(2026, 11, 1, 8, 40, tzinfo=timezone.utc),      # heure simulee 8
+         "cleared": datetime(2026, 11, 1, 8, 42, tzinfo=timezone.utc)}
+    report, _ = vc.baseline_completeness(BASE_ROWS, [w], ["p99_ms"], context_s=0, grace_s=0)
+    assert report[0]["metrics"]["p99_ms"] == "exact"
+    report, _ = vc.baseline_completeness(BASE_ROWS, [w], ["p99_ms"], context_s=600, grace_s=0)
+    assert report[0]["metrics"]["p99_ms"] == "fallback"           # heures simulees 6 et 7 absentes
+
+
+def test_suite_inscrit_le_mode_dans_le_manifeste():
+    src = SUITE.read_text(encoding="utf-8")
+    assert '"season": season.describe(),' in src and "import season" in src

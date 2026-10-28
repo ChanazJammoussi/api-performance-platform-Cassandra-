@@ -1,0 +1,49 @@
+# docker-compose.compresse.yml -- mode "journee compressee" (detection-service/season.py).
+#
+# Fichier COMPLEMENTAIRE : docker-compose.yml n'est pas modifie. A utiliser avec un
+# projet Docker SEPARE, qui a ses propres volumes neufs (base, Prometheus, Grafana,
+# modeles) ; les volumes du projet "cassandra" restent intacts :
+#
+#   docker compose -p cassandra_fresh -f docker-compose.yml -f docker-compose.compresse.yml up -d --build
+#
+# Les noms de conteneurs et les ports sont ceux de docker-compose.yml : l'ancienne
+# stack doit etre arretee avant (sans -v). Ces operations demandent une autorisation
+# separee (voir docs/mode_compresse.md).
+#
+# Ce que ce fichier change :
+#   - SEASON_MODE=compresse pour tous les processus qui calculent une case de
+#     baseline ou chargent un modele (baseline, detector, trainer, model-monitor) ;
+#   - ground truth isolee : scenario-runner/results/compresse/ (les anciennes
+#     campagnes ne sont ni vues, ni deplacees, ni modifiees) ;
+#   - Slack et Gemini desactives pour les essais (valeurs vides : notifier et
+#     explainer ignorent l'integration ; le .env n'est ni lu ni modifie ici) ;
+#   - trainer en demarrage MANUEL uniquement (profil "manuel") :
+#       docker compose -p cassandra_fresh -f docker-compose.yml -f docker-compose.compresse.yml \
+#         run --rm trainer python -u train_model.py
+
+services:
+
+  baseline:
+    environment:
+      - SEASON_MODE=compresse
+    volumes:
+      - ./scenario-runner/results/compresse:/data/results:ro
+
+  detector:
+    environment:
+      - SEASON_MODE=compresse
+      - SLACK_WEBHOOK_URL=
+      - GEMINI_API_KEY=
+    volumes:
+      - ./scenario-runner/results/compresse:/data/results:ro
+
+  model-monitor:
+    environment:
+      - SEASON_MODE=compresse
+
+  trainer:
+    profiles: ["manuel"]
+    environment:
+      - SEASON_MODE=compresse
+    volumes:
+      - ./scenario-runner/results/compresse:/data/results:ro

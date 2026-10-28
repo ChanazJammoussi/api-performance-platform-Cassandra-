@@ -752,44 +752,6 @@
     },
     {
       "type": "stat",
-      "title": "Duree de cycle p95",
-      "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
-      "description": "95e percentile de la duree d'un cycle de detection (budget cadence 60s).",
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "color": { "mode": "thresholds" },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green",  "value": null },
-              { "color": "yellow", "value": 5    },
-              { "color": "red",    "value": 30   }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 32 },
-      "id": 22,
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "area",
-        "justifyMode": "center"
-      },
-      "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
-          "expr": "histogram_quantile(0.95, sum(rate(cassandra_detector_cycle_seconds_bucket[5m])) by (le))",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "stat",
       "title": "Endpoints avec features",
       "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
       "description": "Nombre d endpoints ayant des features disponibles dans endpoint_features au dernier cycle.",

@@ -1,0 +1,11 @@
+id: subslo_step_orders_p100
+description: "Sous-SLO : +100ms sur orders (p99 attendu ~199 < SLO 300). Static ne doit PAS
+  detecter ; Layered doit detecter via deviation baseline + IF si bucket saisonnier reel."
+faults:
+  - service: orders
+    type: latency_step
+    target_endpoint: "GET /orders/{order_id}"
+    params:
+      latency_ms: 100
+    duration_seconds: 300
+    wait_before_seconds: 5

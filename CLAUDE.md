@@ -1,4 +1,9 @@
-# CLAUDE.md — Cassandra project instructions
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+Cassandra detects, attributes and explains API performance degradation on a fault-injection
+demo stack (3 FastAPI services → OTel → Prometheus → TimescaleDB → layered detector → LLM → Slack).
 
 ## Authoritative design reference
 
@@ -7,6 +12,75 @@
 Any code MUST conform to it. If code and spec disagree, either the code is a **documented
 deliberate adaptation** (listed below) or it is a bug — never silently reinterpret the spec.
 When a task is ambiguous, the spec wins; if the spec is silent, ask.
+
+## Commands
+
+```bash
+docker compose up -d --build              # whole stack (Grafana :3000 admin/admin, Prometheus :9090, deploy API :8090/docs)
+docker compose down -v                    # ALWAYS -v between demos (drops volumes / residual data)
+k6 run k6/load.js                         # diurnal traffic (day compressed into 2 h); k6/load_light.js = lighter
+bash scripts/demo.sh                      # scripted end-to-end demo (traffic -> deploy -> inject -> detect -> attribute)
+docker compose logs -f detector           # follow the detection loop
+
+# Fault injection (from scenario-runner/): one scenario, or the full evaluation campaign
+python runner.py scenarios/bad_deploy.yaml [--duration-override 120]
+python run_evaluation_suite.py [--resume] [--continue-on-error]
+
+# Offline jobs (detection-service/, inside a container or with DATABASE_URL pointing at localhost:5434)
+python train_model.py [--dry-run] [--force] [--lookback-days 14]   # --force bypasses the sanity gate
+python evaluate_layered.py [--persist]    # layered vs static table (§9.3); --persist writes eval_runs
+python tune_contamination.py              # contamination / FIRE_THRESHOLD sweep (in-memory, no promotion)
+
+# Report PDF (report/): python generate_report.py -> report/output/Cassandra_Report.pdf
+```
+
+**Tests** (pure-logic unit tests in `detection-service/tests/`, `pytest.ini` sets `testpaths=tests`;
+CI = `.github/workflows/ci.yml`, Python 3.12, `pip install -r requirements-dev.txt && python -m pytest -q`):
+
+```bash
+# Full suite, from the repo root (Git Bash: prefix with MSYS_NO_PATHCONV=1 if the mount path gets mangled)
+docker compose run --rm -v "$PWD/detection-service:/app" trainer \
+  sh -c "pip install -q pytest && cd /app && python -m pytest"
+# Single test: replace the last command with e.g.
+#   python -m pytest tests/test_features.py::<test_name> -q
+```
+
+There is no linter/formatter configured.
+
+## Architecture (big picture)
+
+- **Data path:** `services/{gateway,orders,payments}` emit OTLP spans → `otel-collector`
+  (spanmetrics + PII redaction) → Prometheus remote-write → `scraper.py` (60 s) →
+  `endpoint_features` hypertable. `baseline_job.py` (hourly) → `endpoint_baseline`.
+  `orders`/`payments` expose `/faults/*` (latency_step, latency_creep, error_burst, pool_shrink,
+  downstream_slow, reset, state) which `scenario-runner/runner.py` drives; each run writes a
+  ground-truth JSON to `scenario-runner/results/` (mounted read-only into detector/baseline/trainer
+  as `GROUND_TRUTH_DIR`).
+- **Detection-service = one image, several processes** (compose overrides `command`): `scraper`,
+  `detector`, `baseline`, `trainer` (nightly), `model-monitor` (KS drift → `model_health`),
+  `deploy-api` (uvicorn). `trainer` and `detector` share the `models_data` volume; the detector
+  hot-reloads `iforest_latest.joblib` when the pointer changes (`maybe_load_model()`).
+- **One detector cycle (`detector.py::run_detection`)**, per endpoint: L0 static SLO
+  (`baseline_utils.ENDPOINT_SLOS`) → L1 baseline deviation + `direction` → L2 iforest on
+  `features.compute_features()` (calibrated, gated by direction) → `combined` score
+  (fires if SLO breach or `combined >= FIRE_THRESHOLD` = 0.6) → `analyze_service_graph()` →
+  `write_anomaly()` → `process_signal()` state machine (OK→PENDING→FIRING→RESOLVING, M=2/R=2).
+  `error_rate_5xx` is a separate static-only signal. **Only the OK→FIRING transition** triggers
+  `correlator` (ground truth + `deploy_events`) → `explainer` (Gemini, template fallback) →
+  `notifier` (Slack).
+- **Shared train/serve features:** `features.py` is pure numpy and is the single source of the
+  feature vector (`FEATURE_NAMES`) for both `train_model.py` and the detector — change it in one
+  place only, and retrain after changing it (artifact meta stores `feature_names`).
+- **Schema:** `timescaledb/init.sql` only runs on a fresh volume. Additive column changes to
+  `alerts` are also applied at startup by `detector.py::ensure_schema()`; otherwise a schema change
+  needs `docker compose down -v`.
+- **Evaluation:** `evaluation.py` / `evaluate_layered.py` match alerts/anomalies against
+  ground-truth windows; results feed `eval_runs` and the Grafana eval dashboard
+  (`grafana/provisioning/dashboards/*.json`, provisioned). `docs/results.md` summarizes them.
+- **`.gitignore` ignores `*.json`** except the whitelisted dashboards and
+  `scenario-runner/ground_truth_test.json` — a new dashboard JSON must be whitelisted. Ad-hoc
+  scripts in `detection-service/` (`check_*.py`, `test_cause*.py`, `measure_noise.py`, ...) are ignored local
+  diagnostics, not part of the test suite.
 
 ## Deliberate adaptations (current code vs spec — do NOT "fix" these blindly)
 
@@ -23,6 +97,7 @@ When a task is ambiguous, the spec wins; if the spec is silent, ask.
   `localhost:5434`; in containers it is overridden to `timescaledb:5432` (see `docker-compose.yml`).
 - **`deploy_events`:** `deploy_id` is UUID (spec §6.5 says text); no `kind` column yet, so
   correlation uses temporal proximity only (no event-kind priors §5.6 yet).
+- **Seasonal clock (`season.py`):** every `(dow, hour_bucket)` is computed by `detection-service/season.py`. `SEASON_MODE=reel` (default) = PostgreSQL dow × UTC hour (unchanged); `SEASON_MODE=compresse` = the 2-hour simulated day of `k6/load.js` (starts at each even UTC hour, 1 simulated hour = 5 real minutes, `dow` always 0), as allowed by spec §5.3. The mode is recorded in model meta and campaign manifests; mismatches are refused. See `docs/mode_compresse.md`.
 
 ## Deliberate architectural extensions
 

@@ -38,6 +38,10 @@ RELATIONSHIPS = [
 ]
 
 def query_prometheus(promql):
+    """
+    {(service, route): valeur} ; {} si la requete reussit sans resultat ; None si elle
+    echoue (erreur reseau, reponse illisible, statut different de "success").
+    """
     try:
         resp = requests.post(
             f"{PROMETHEUS_URL}/api/v1/query",
@@ -46,7 +50,8 @@ def query_prometheus(promql):
         )
         data = resp.json()
         if data["status"] != "success":
-            return {}
+            log.error(f"Prometheus query refused: {data.get('error', data['status'])}")
+            return None
         result = {}
         for item in data["data"]["result"]:
             labels = item["metric"]
@@ -62,52 +67,67 @@ def query_prometheus(promql):
         return result
     except Exception as e:
         log.error(f"Prometheus query failed: {e}")
-        return {}
+        return None
 
 def fetch_features():
     """Récupère toutes les features depuis Prometheus pour tous les endpoints."""
     window = "5m"
 
+    # Latences et rps : un echec de requete reste un resultat vide (comportement inchange :
+    # sans p99 valide, aucune ligne n'est ecrite pour l'endpoint).
     # p50, p95, p99 -- on agrège les buckets par (service_name, http_route, le)
     # avant de calculer le quantile, pour fusionner les series par http_status_code.
     p50 = query_prometheus(
         f'histogram_quantile(0.50, sum by (service_name, http_route, le) ('
         f'rate(duration_milliseconds_bucket{{span_kind="SPAN_KIND_SERVER"}}[{window}])))'
-    )
+    ) or {}
     p95 = query_prometheus(
         f'histogram_quantile(0.95, sum by (service_name, http_route, le) ('
         f'rate(duration_milliseconds_bucket{{span_kind="SPAN_KIND_SERVER"}}[{window}])))'
-    )
+    ) or {}
     p99 = query_prometheus(
         f'histogram_quantile(0.99, sum by (service_name, http_route, le) ('
         f'rate(duration_milliseconds_bucket{{span_kind="SPAN_KIND_SERVER"}}[{window}])))'
-    )
+    ) or {}
 
     # RPS -- rate sur calls_total, somme par (service, route) dans query_prometheus
     rps = query_prometheus(
         f'rate(calls_total{{span_kind="SPAN_KIND_SERVER"}}[{window}])'
-    )
+    ) or {}
 
-    # Pourcentage d'erreurs 5xx
-    err5xx = query_prometheus(
-        f'100 * sum without(http_status_code, status_code) ('
-        f'rate(calls_total{{span_kind="SPAN_KIND_SERVER", http_status_code=~"5.."}}[{window}]))'
-        f' / sum without(http_status_code, status_code) ('
-        f'rate(calls_total{{span_kind="SPAN_KIND_SERVER"}}[{window}]))'
-    )
+    # Appels serveur entre deux echantillons du collecteur, nouvelles series comprises.
+    # rate() ignore la premiere valeur d'une serie qui apparait deja > 0 : les premieres
+    # erreurs d'une route etaient invisibles (26 reponses 500 le 25/10 vers 23:00, audit
+    # du 27/10). Pour chaque serie :
+    #   S - dernier echantillon d'avant la fenetre (cherche jusqu'a 6 h en arriere) : appels
+    #     entre ces deux echantillons -- de 4 a 6 min environ (export toutes les 60 s), pas
+    #     exactement 5 ; apres une coupure de collecte < 6 h, toute la coupure ;
+    #   sinon "or S" : serie apparue (aucun echantillon depuis 6 h) ou compteur remis a zero
+    #     -> appels depuis son depart a 0.
+    #   Limite : une serie expiree par le collecteur (5 min sans appel) puis recreee en
+    #     moins de 6 h est comparee a la derniere valeur de l'ancienne ; tant que la nouvelle
+    #     a moins de 5 min, seule la difference est comptee (sous-estimation, 0 possible).
+    # Le ratio est donc une part d'erreurs sur cet intervalle, pas un taux sur 5 min exactes.
+    def appels(filtre=""):
+        s = f'calls_total{{span_kind="SPAN_KIND_SERVER"{filtre}}}'
+        return (f'sum without(http_status_code, status_code) '
+                f'((({s} - last_over_time({s}[6h] offset {window})) >= 0) or {s})')
 
-    # Pourcentage d'erreurs 4xx
-    err4xx = query_prometheus(
-        f'100 * sum without(http_status_code, status_code) ('
-        f'rate(calls_total{{span_kind="SPAN_KIND_SERVER", http_status_code=~"4.."}}[{window}]))'
-        f' / sum without(http_status_code, status_code) ('
-        f'rate(calls_total{{span_kind="SPAN_KIND_SERVER"}}[{window}]))'
-    )
+    # Pourcentages d'erreurs 5xx et 4xx (None si la requete echoue : jamais 0 % par defaut)
+    code_5xx = ', http_status_code=~"5.."'
+    code_4xx = ', http_status_code=~"4.."'
+    err5xx = query_prometheus(f"100 * {appels(code_5xx)} / {appels()}")
+    err4xx = query_prometheus(f"100 * {appels(code_4xx)} / {appels()}")
 
     return p50, p95, p99, rps, err5xx, err4xx
 
 def write_features(conn, now, p50, p95, p99, rps, err5xx, err4xx):
     """Ecrit une ligne dans endpoint_features pour chaque endpoint."""
+    if err5xx is None or err4xx is None:
+        # Une requete d'erreurs en echec n'est jamais enregistree comme 0 % : le cycle est
+        # saute (comme un endpoint sans p99), le detecteur ne traite pas de mesure inventee.
+        log.warning("Error-rate query failed -- no endpoint features written this cycle")
+        return
     cur = conn.cursor()
     written = 0
     for ep in ENDPOINTS:

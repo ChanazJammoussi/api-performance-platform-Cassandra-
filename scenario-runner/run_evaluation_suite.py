@@ -2,15 +2,21 @@
 """
 run_evaluation_suite.py — Framework de benchmarking multi-scénarios.
 
-Génère une campagne dans results/campaign_<YYYYMMDD_HHMM>/ avec :
+Génère une campagne dans <results>/campaign_<YYYYMMDD_HHMM>/ avec :
   manifest.json, summary.json, summary.csv, benchmark_summary.md
   logs/<scenario>_core.log, <scenario>_stress.log
   ground_truth/<scenario>_core_<ts>.json, <scenario>_stress_<ts>.json
 
+SEASON_MODE est OBLIGATOIRE dans l'environnement de la commande (pas dans .env) :
+  SEASON_MODE=reel      -> <results> = results/ par defaut ; results/compresse/ interdit
+  SEASON_MODE=compresse -> <results> = results/compresse/ par defaut ; rien en dehors
+Une reprise (--resume) dans un autre mode que celui de la campagne est refusee.
+Tout refus a lieu avant la creation des dossiers et avant toute injection (code 2).
+
 Usage:
-    python run_evaluation_suite.py [options]
-    python run_evaluation_suite.py --resume
-    python run_evaluation_suite.py --continue-on-error
+    SEASON_MODE=reel python run_evaluation_suite.py [options]
+    SEASON_MODE=compresse python run_evaluation_suite.py --resume
+    SEASON_MODE=reel python run_evaluation_suite.py --continue-on-error
 """
 
 from __future__ import annotations
@@ -19,6 +25,7 @@ import argparse
 import csv
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -45,6 +52,7 @@ from runner import PROMETHEUS_RESIDUE_WINDOW  # noqa: E402  (source de vérité 
 # FIN de sys.path pour ne masquer aucun module du scenario-runner.
 sys.path.append(str(DETECTION_DIR))
 import validation_checks as vc  # noqa: E402
+import season  # noqa: E402  (horloge saisonniere : mode inscrit dans le manifeste)
 
 FEATURES_PY = DETECTION_DIR / "features.py"
 
@@ -122,16 +130,192 @@ def yaml_max_duration(scenario_path: Path) -> int:
 
 # ── Vérification des processus ───────────────────────────────────────────────
 
+def campaign_k6_running(processes, load_js) -> bool:
+    """
+    Vrai seulement si `processes` (objets Name/CommandLine de Win32_Process, filtres sur
+    k6.exe) contient UN seul processus dont la ligne de commande est exactement celle du
+    mode hote de scripts/run_compressed_days.sh :
+        <dossier>/k6.exe run --quiet --no-usage-report <load_js>
+    load_js : chemin absolu de k6/load.js de CE depot. Casse, separateurs \\ et / et
+    guillemets autour d'un argument ignores. Tout autre cas -> False : zero ou plusieurs
+    k6.exe, entree mal formee, ligne absente, argument absent, en plus ou deplace.
+    """
+    if not isinstance(processes, list) or len(processes) != 1:
+        return False
+    p = processes[0]
+    if not isinstance(p, dict) or str(p.get("Name") or "").lower() != "k6.exe":
+        return False
+    try:
+        # Decoupage a la Windows : posix=False n'interprete pas les \ (chemins) et garde
+        # les guillemets autour d'un argument (retires ci-dessous) ; guillemet non ferme
+        # -> ValueError -> refus.
+        args = shlex.split(str(p.get("CommandLine") or ""), posix=False)
+    except ValueError:
+        return False
+    norm = [a.strip('"').replace("\\", "/").lower() for a in args]
+    target = str(load_js).replace("\\", "/").lower()
+    return (len(norm) == 5 and norm[0].rsplit("/", 1)[-1] == "k6.exe"
+            and norm[1:] == ["run", "--quiet", "--no-usage-report", target])
+
+
+def host_k6_state() -> str:
+    """
+    Etat du k6 Windows du mode hote (docs/mode_compresse.md), lu dans Win32_Process.
+    PowerShell renvoie toujours une liste JSON (ConvertTo-Json -InputObject @(...)) :
+      "hors_windows" : pas Windows, rien n'est interroge (un k6.exe est invisible d'ici) ;
+      "absent"       : liste vide [] -- l'absence doit etre prouvee ;
+      "conforme"     : un seul k6.exe, celui de run_compressed_days.sh (campaign_k6_running) ;
+      "non_conforme" : k6.exe present mais autre commande, ou plusieurs k6.exe ;
+      "inverifiable" : PowerShell absent, delai depasse, code non nul, texte sur stderr,
+                       sortie vide, JSON invalide ou autre chose qu'une liste.
+    """
+    if os.name != "nt":
+        return "hors_windows"
+    ps = ("$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; "
+          "$p = @(Get-CimInstance Win32_Process -Filter \"Name='k6.exe'\" | "
+          "Select-Object Name,CommandLine); ConvertTo-Json -InputObject $p -Compress")
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                           capture_output=True, text=True, errors="replace", timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return "inverifiable"
+    if r.returncode != 0 or r.stderr.strip():
+        return "inverifiable"
+    try:
+        data = json.loads(r.stdout)
+    except ValueError:              # sortie vide comprise : "absent" doit etre prouve par []
+        return "inverifiable"
+    if not isinstance(data, list):
+        return "inverifiable"
+    if not data:
+        return "absent"
+    return "conforme" if campaign_k6_running(data, CASSANDRA_DIR / "k6" / "load.js") else "non_conforme"
+
+
+def _image_k6(image):
+    """
+    True si la reference d'image Docker designe k6, c'est-a-dire si le dernier element
+    du nom de depot est exactement "k6", quels que soient le registre (docker.io,
+    localhost:5000, registre prive), le tag et le digest :
+      grafana/k6, grafana/k6:latest, localhost:5000/grafana/k6@sha256:... -> True ;
+      grafana/k6-operator, grafana/k6x, grafana/grafana:10.4.0            -> False.
+    None si l'image n'est qu'un identifiant (image supprimee ou renommee depuis le
+    lancement du conteneur) : l'image ne permet pas de conclure.
+    """
+    ref = image.strip().lower().split("@", 1)[0]              # sans digest
+    if ref.startswith("sha256:") or (len(ref) in (12, 64)
+                                     and all(c in "0123456789abcdef" for c in ref)):
+        return None
+    parts = ref.split("/")
+    if len(parts) > 1 and ("." in parts[0] or ":" in parts[0] or parts[0] == "localhost"):
+        parts = parts[1:]                                     # sans registre
+    return parts[-1].split(":", 1)[0] == "k6"                 # sans tag
+
+
+def _executable(command):
+    """
+    Nom de l'executable lance par un conteneur : premier mot de la colonne COMMAND de
+    docker ps --no-trunc (entre guillemets), sans son chemin. "" si la commande est vide.
+    """
+    c = command.strip()
+    if len(c) >= 2 and c[0] == c[-1] == '"':
+        c = c[1:-1]
+    mots = c.split()
+    return mots[0].replace("\\", "/").rsplit("/", 1)[-1].lower() if mots else ""
+
+
+def k6_docker_containers(lines):
+    """
+    (noms, None) : conteneurs k6 parmi les lignes "nom|image|commande" de
+    docker ps --no-trunc -- image k6 (_image_k6) OU executable k6 (point d'entree de
+    grafana/k6 : Entrypoint ["k6"]), meme si l'image n'est affichee que par son identifiant.
+    (None, raison) si une ligne est illisible, ou si un conteneur n'a ni image identifiable
+    ni commande : dans le doute, le controle k6 refuse.
+    """
+    noms = []
+    for line in lines:
+        parts = line.split("|", 2)                            # la commande peut contenir "|"
+        if len(parts) != 3 or not parts[0].strip() or not parts[1].strip():
+            return None, "sortie docker ps illisible"
+        nom, image = parts[0].strip(), parts[1].strip()
+        verdict, exe = _image_k6(image), _executable(parts[2])
+        if verdict or exe in ("k6", "k6.exe"):
+            noms.append(nom)
+        elif verdict is None and not exe:
+            return None, f"conteneur {nom} : image non identifiable ({image}) et commande vide"
+    return noms, None
+
+
+def k6_source(container_names, host_state, mode, conteneurs_k6=()):
+    """
+    (ok, detail) : exactement UNE source de trafic k6 pour le mode saisonnier `mode`
+    (season.MODES ; noms fixes des scripts du depot) :
+      compresse : uniquement le k6.exe conforme du mode hote -- docs/mode_compresse.md :
+                  la campagne doit utiliser le meme chemin (k6 sous Windows) que la baseline ;
+      reel      : le conteneur cassandra-demo-k6 (scripts/demo.sh, benchmark/keep_k6_*.sh) ;
+                  le mode hote n'est prevu qu'en compresse.
+    Conteneur k6 = nom contenant "k6" OU conteneurs_k6 (image ou executable k6, voir
+    k6_docker_containers). Tout autre conteneur k6 (y compris cassandra-k6-compresse en
+    compresse), deux sources, plusieurs conteneurs, k6.exe douteux, Windows inverifiable
+    ou mode inconnu -> refus.
+    """
+    autorises = {season.COMPRESSE: (),
+                 season.REEL: ("cassandra-demo-k6",)}.get(mode)
+    if autorises is None:
+        return False, f"mode saisonnier inconnu : {mode!r}"
+    if host_state not in ("hors_windows", "absent", "conforme"):
+        return False, f"k6 Windows {host_state or 'inconnu'}"
+    docker = sorted({n for n in container_names if "k6" in n} | set(conteneurs_k6))
+    if host_state == "conforme":
+        if mode != season.COMPRESSE:
+            return False, f"k6.exe du mode hote non prevu en mode {mode}"
+        if docker:
+            return False, f"deux sources : k6.exe et {', '.join(docker)}"
+        return True, "k6.exe mode hote"
+    inconnus = [n for n in docker if n not in autorises]
+    if inconnus:
+        return False, f"conteneur k6 non autorise en mode {mode} : {', '.join(inconnus)}"
+    if len(docker) == 1:
+        return True, f"conteneur {docker[0]}"
+    if docker:
+        return False, f"plusieurs conteneurs k6 : {', '.join(docker)}"
+    return False, "aucune source k6"
+
+
 def check_processes() -> bool:
-    result = subprocess.run(["ps", "aux"], capture_output=True, text=True)
-    out = result.stdout
+    """
+    Services requis en marche : conteneurs cassandra-scraper, cassandra-detector et
+    exactement UNE source de trafic k6 (k6_source) : un conteneur k6 autorise pour le mode
+    saisonnier (docker ps : nom, image ou executable) ou le k6.exe du mode hote
+    (host_k6_state), jamais les deux. Sortie docker ps illisible -> refus.
+    Lecture seule. Les services tournent dans des conteneurs : ps aux sur l'hote ne les
+    voit pas (Windows, Git Bash, WSL).
+    """
+    try:
+        result = subprocess.run(["docker", "ps", "--no-trunc", "--format", "{{.Names}}|{{.Image}}|{{.Command}}"],
+                                capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"  [FAIL] docker ps impossible ({exc})")
+        return False
+    if result.returncode != 0:
+        print(f"  [FAIL] docker ps a echoue : {result.stderr.strip()[:200]}")
+        return False
     all_ok = True
-    for name in ["scraper.py", "detector.py", "k6"]:
-        ok = name in out
+    lignes = [l.strip() for l in result.stdout.splitlines() if l.strip()]
+    names = [l.split("|", 1)[0] for l in lignes]
+    conteneurs_k6, raison = k6_docker_containers(lignes)
+    for name, ok in vc.running_services(names):
+        if name == "k6":   # remplace par la regle de source unique (k6_source), ci-dessous
+            continue
         print(f"  [{'OK  ' if ok else 'FAIL'}] {name}")
         if not ok:
             all_ok = False
-    return all_ok
+    if conteneurs_k6 is None:  # dans le doute (sortie illisible ou ambigue) : refus
+        k6_ok, k6_detail = False, raison
+    else:
+        k6_ok, k6_detail = k6_source(names, host_k6_state(), season.MODE, conteneurs_k6)
+    print(f"  [{'OK  ' if k6_ok else 'FAIL'}] k6 ({k6_detail})")
+    return all_ok and k6_ok
 
 
 # ── Garde DB ─────────────────────────────────────────────────────────────────
@@ -383,9 +567,17 @@ class BenchmarkSuite:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         self.config = load_config()
+        # G1/G2 : mode explicite et coherent (apres chargement du .env), dossier de
+        # sortie conforme au mode. Refus AVANT toute ecriture.
+        try:
+            self.season_mode, results_dir = vc.campaign_target(
+                os.environ, args.results_dir, SUITE_DIR / "results", season.MODE)
+        except vc.CampaignTargetError as e:
+            print(f"ERREUR : {e}", file=sys.stderr)
+            sys.exit(2)
         self.ts = utc_now().strftime("%Y%m%d_%H%M")
         self.campaign_id = f"campaign_{self.ts}"
-        self.results_dir = Path(args.results_dir).resolve()
+        self.results_dir = results_dir
         self.campaign_dir = self.results_dir / self.campaign_id
         self.entries: list[dict] = []
         self.last_cleared_at: Optional[datetime] = None
@@ -451,6 +643,9 @@ class BenchmarkSuite:
             "baseline_snapshot": vc.BASELINE_SNAPSHOT_NAME,
             "baseline_fingerprint": baseline_fp,
             "baseline_row_count": baseline_rows,
+            # Mode de l'horloge saisonniere de CE processus (SEASON_MODE) : doit etre
+            # celui de la stack, sinon la campagne est refusee a l'evaluation.
+            "season": season.describe(),
         }
         (self.campaign_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
         return manifest
@@ -616,19 +811,29 @@ class BenchmarkSuite:
         if self.args.resume:
             self._load_resume()
 
-        self._setup_dirs()
-        scenarios = discover_scenarios(Path(self.args.scenarios_dir))
-
+        # G3 : une campagne existante (reprise) doit etre dans le mode actuel ;
+        # controle AVANT la creation des dossiers et toute injection.
         manifest_path = self.campaign_dir / "manifest.json"
+        manifest = None
         if manifest_path.exists():
             with open(manifest_path) as f:
                 manifest = json.load(f)
-        else:
+            reasons = vc.season_mode_reasons(manifest)
+            if reasons:
+                for r in reasons:
+                    print(f"ERREUR : reprise refusee -- {r}", file=sys.stderr)
+                sys.exit(2)
+
+        self._setup_dirs()
+        scenarios = discover_scenarios(Path(self.args.scenarios_dir))
+
+        if manifest is None:
             manifest = self._write_manifest(scenarios)
 
         print()
         print("=" * 65)
         print(f"  CAMPAGNE    {self.campaign_id}")
+        print(f"  mode        {season.describe()}")
         print(f"  commit      {manifest['commit_sha'][:12]}")
         print(f"  scénarios   {len(scenarios)} (quiet_baseline exclu)")
         print(f"  config      PENDING_WINDOWS={self.config['pending_windows']}  "
@@ -706,9 +911,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--results-dir",
-        default=str(SUITE_DIR / "results"),
+        default=None,
         metavar="DIR",
-        help="Dossier racine pour les campagnes (défaut: results/)",
+        help="Dossier racine pour les campagnes (défaut selon SEASON_MODE : results/ en mode "
+             "reel, results/compresse/ en mode compresse)",
     )
     p.add_argument(
         "--min-core-duration",

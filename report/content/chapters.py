@@ -197,10 +197,14 @@ def ch3():
         ["Service", "Port (hôte)", "Rôle"],
         [
             ["gateway", "8000", "Point d'entrée, proxy vers orders / payments"],
-            ["orders / payments", "8001 / 8002", "Services démo instrumentés OTel + API fault interne"],
-            ["otel-collector", "4317/4318/8888", "spanmetrics (RED) + filtrage d'attributs -> Prometheus"],
+            ["orders", "8001", "Service commandes — instrumenté OTel, API fault interne"],
+            ["payments", "8002", "Service paiements — instrumenté OTel, API fault interne"],
+            ["otel-collector", "4317", "Récepteur OTLP gRPC — ingestion traces/métriques depuis les services"],
+            ["", "4318", "Récepteur OTLP HTTP — alternative HTTP/protobuf au gRPC"],
+            ["", "8888", "Exposition des métriques internes du collector (scraping Prometheus)"],
             ["prometheus", "9090", "Stockage des métriques (remote-write)"],
-            ["timescaledb", "5434 -> 5432", "Features, baseline, alertes, anomalies, déploiements"],
+            ["timescaledb", "5434 (hôte)", "Port hôte — accès depuis l'hôte et les outils externes"],
+            ["", "5432 (conteneur)", "Port PostgreSQL standard dans le conteneur"],
             ["detector", "&mdash;", "Détection en couches, state machine, corrélation, LLM"],
             ["trainer", "&mdash;", "Réentraînement nightly de l'Isolation Forest"],
             ["deploy-api", "8090", "Registre des déploiements (POST/GET /deploys)"],
@@ -226,47 +230,105 @@ def ch4():
     s = [C.begin_chapter("Génération de scénarios de panne et fault injection", S.GREEN), C.spacer(6)]
     s.append(C.lead(
         "Le banc de démonstration n'est pas un artefact secondaire : c'est la source des "
-        "scénarios de faute contrôlés servant de vérité-terrain expérimentale et rendant "
+        "scénarios de faute contrôlés servant de vérité-terrain expérimentale (<i>ground truth</i>) et rendant "
         "l'évaluation quantitative possible."))
     s.append(C.subh("Microservices de démonstration"))
     s.append(C.para(
         "Trois services (<font face='Courier'>gateway</font>, <font face='Courier'>orders</font>, "
         "<font face='Courier'>payments</font>) forment une topologie d'appels réaliste "
-        "(gateway -&gt; orders, gateway -&gt; payments -&gt; orders), chacun instrumenté OTel avec "
-        "des routes templateées (<font face='Courier'>http.route</font> renseigné). Un pool de "
+        "(<font face='Courier'>gateway -&gt; orders</font>, "
+        "<font face='Courier'>gateway -&gt; payments -&gt; orders</font>), chacun instrumenté avec "
+        "<b>OpenTelemetry</b> pour la collecte des données d'observabilité, avec des endpoints "
+        "regroupés par modèle d'URL afin de faciliter l'analyse des métriques. Un pool de "
         "connexions PostgreSQL rend la saturation réaliste."))
     s.append(C.subh("Charge et saisonnalité"))
     s.append(C.para(
         "Le générateur k6 produit un trafic en forme de journée compressée (une « journée » "
-        "de saisonnalité rejouée en 2 heures, courbe 5&rarr;50 VUs) pour que la baseline ait une "
-        "structure à apprendre à l'échelle du développement. Les clés de baseline "
-        "(<font face='Courier'>dow</font>, <font face='Courier'>hour_bucket</font>) restent "
-        "<i>period-agnostic</i>, donc réutilisables sur un run temps-réel lent."))
-    s.append(C.subh("Modes de faute"))
+        "de saisonnalité rejouée en 2 heures, avec une variation de 5 à 50 VUs) afin de créer "
+        "des variations temporelles réalistes permettant à la baseline d'apprendre le comportement "
+        "normal du système. Les clés de baseline "
+        "(<font face='Courier'>dow</font>, <font face='Courier'>hour_bucket</font>) sont définies "
+        "indépendamment de la durée de la simulation et restent donc réutilisables lors "
+        "d'exécutions ultérieures."))
     s.append(C.data_table(
-        ["Faute", "Forme", "Simulé"],
+        ["Stage", "Durée", "VUs cible", "Période simulée"],
         [
-            ["latency_creep", "Rampe progressive de latence", "Fuite mémoire, décroissance de cache"],
-            ["latency_step", "Latence fixe immédiate", "Mauvais déploiement, régression aval"],
-            ["pool_shrink", "Réduction du pool DB", "Saturation sous charge"],
-            ["error_burst", "Injection de 5xx", "Panne de dépendance, mauvais chemin de code"],
-            ["downstream_slow", "Ralentissement d'une dépendance", "Dégradation en cascade"],
-            ["bad_deploy", "Deploy event puis faute différée", "Scénario d'attribution bout-en-bout"],
+            ["1", "20 min", "25",  "Matin — montée"],
+            ["2", "40 min", "50",  "Midi — pic"],
+            ["3", "20 min", "50",  "Après-midi — maintien"],
+            ["4", "30 min", "15",  "Soir — descente"],
+            ["5", "10 min", "5",   "Nuit — creux"],
+        ],
+        header_color=S.SECONDARY,
+        align_center_cols=[0, 1, 2],
+        col_widths=[1.5 * S.cm, 2.0 * S.cm, 2.5 * S.cm, S.CONTENT_WIDTH - 6.0 * S.cm]))
+    s.append(C.para(
+        "Cette séquence reproduit une alternance de périodes de faible activité et de forte "
+        "sollicitation, afin d'éviter qu'une variation normale de charge soit interprétée comme "
+        "une dégradation applicative."))
+    s.append(C.subh("Modes de faute et mécanismes d'injection"))
+    s.append(C.data_table(
+        ["Faute / Action", "Forme injectée", "Endpoint d'injection", "Paramètres"],
+        [
+            ["latency_creep",   "Rampe progressive de latence",          "POST /faults/latency_creep",   "target_ms, duration_minutes"],
+            ["latency_step",    "Latence fixe immédiate",                "POST /faults/latency_step",    "latency_ms"],
+            ["pool_shrink",     "Réduction du pool DB",                  "POST /faults/pool_shrink",     "pool_max"],
+            ["error_burst",     "Injection de 5xx",                      "POST /faults/error_burst",     "error_rate (0.0–1.0)"],
+            ["downstream_slow", "Ralentissement d'une dépendance",       "POST /faults/downstream_slow", "latency_ms"],
+            ["bad_deploy",      "Injection latency_step précédée d'un enregistrement de déploiement", "POST /deploys + POST /faults/latency_step", "—"],
         ],
         header_color=S.GREEN,
-        col_widths=[3.0 * S.cm, 5.2 * S.cm, S.CONTENT_WIDTH - 8.2 * S.cm]))
+        col_widths=[3.6 * S.cm, 4.5 * S.cm, 4.2 * S.cm, S.CONTENT_WIDTH - 12.3 * S.cm]))
+    s.append(C.callout(
+        "<b>Note sur bad_deploy :</b> dans le fichier <font face='Courier'>bad_deploy.yaml</font> "
+        "actuel, la faute injectée est toujours <font face='Courier'>latency_step</font>. "
+        "Ce n'est pas une contrainte du mécanisme : le runner enregistre le "
+        "<font face='Courier'>deploy_event</font> avant d'exécuter les fautes listées dans le YAML, "
+        "quel que soit leur type. Le scénario pourrait tout aussi bien utiliser "
+        "<font face='Courier'>error_burst</font> ou <font face='Courier'>latency_creep</font>.",
+        kind="tech"))
+    s.append(C.para(
+        "Un endpoint <font face='Courier'>POST /faults/reset</font> remet tous les états de faute "
+        "à zéro entre deux scénarios, garantissant l'isolation des injections."))
+    s.append(C.subh("Scénarios d'injection associés"))
+    s.append(C.para(
+        "Les types de fautes précédents sont déclinés en scénarios paramétrés définis dans le "
+        "scenario-runner. Chaque scénario correspond à une configuration d'injection permettant "
+        "d'évaluer un comportement particulier du détecteur."))
+    s.append(C.data_table(
+        ["Fichier scénario", "Type de faute", "Service ciblé", "Paramètres clés", "Objectif"],
+        [
+            ["latency_creep_orders.yaml",     "latency_creep",              "orders",          "target_ms=800, 2 min", "Dégradation progressive de latence"],
+            ["latency_creep_slow.yaml",       "latency_creep",              "orders",          "target_ms=400, 3 min", "Tester la sensibilité aux dégradations lentes"],
+            ["latency_step_small.yaml",       "latency_step",               "orders",          "100 ms",              "Tester la limite de détection sur un faible signal"],
+            ["latency_step_large.yaml",       "latency_step",               "orders",          "1000 ms",             "Tester une dégradation forte"],
+            ["error_burst_low.yaml",          "error_burst",                "payments",        "20 %",                "Évaluer les faibles pics d'erreurs"],
+            ["error_burst_payments.yaml",     "error_burst",                "payments",        "70 %",                "Simuler une dégradation importante"],
+            ["error_burst_high.yaml",         "error_burst",                "payments",        "90 %",                "Tester un incident franc"],
+            ["pool_shrink_orders.yaml",       "pool_shrink",                "orders",          "pool_max=1",          "Saturation du pool de connexions"],
+            ["pool_shrink_heavy.yaml",        "pool_shrink",                "orders",          "pool_max=1, 120 s",   "Saturation prolongée"],
+            ["downstream_slow_payments.yaml", "downstream_slow",            "payments",        "600 ms",              "Tester une dégradation en cascade"],
+            ["bad_deploy.yaml",               "latency_step + deploy event","orders",          "500 ms, 90 s",        "Attribution après déploiement"],
+            ["combined_latency_errors.yaml",  "latency_step + error_burst", "orders + payments","400 ms, 40 %",       "Tester des fautes combinées"],
+            ["quiet_baseline.yaml",           "Aucune faute",               "—",               "—",                   "Mesurer les faux positifs en fonctionnement normal"],
+            ["test_basic.yaml",               "latency_step + error_burst", "orders + payments","300 ms, 50 %",       "Validation fonctionnelle du runner"],
+        ],
+        header_color=S.GREEN,
+        col_widths=[4.2 * S.cm, 3.4 * S.cm, 2.6 * S.cm, 2.8 * S.cm, S.CONTENT_WIDTH - 13.0 * S.cm]))
     s.append(C.subh("Scénario runner et vérité-terrain"))
     s.append(C.para(
-        "Un CLI exécute des fichiers de scénario déclaratifs (YAML) &mdash; séquence de fautes "
-        "avec timing, magnitude et endpoint cible &mdash; et journalise les fenêtres exactes "
-        "d'injection dans un <b>log de vérité-terrain</b> consommé par le pipeline d'évaluation. "
-        "Une suite standard d'environ 20 scénarios, couvrant tous les types de faute à plusieurs "
-        "magnitudes, est versionnée avec le dépôt."))
+        "Un CLI orchestre l'exécution des scénarios de <b>fault injection</b> décrits dans des fichiers "
+        "<b>YAML</b> déclaratifs, précisant le <b>type de faute</b>, le <b>timing</b>, la <b>magnitude</b> "
+        "et l'<b>endpoint cible</b>. "
+        "Le <b>scénario runner</b> journalise les fenêtres exactes d'injection dans un fichier de "
+        "<b>vérité-terrain</b> (<i>ground truth</i>) utilisé par le <b>pipeline d'évaluation</b>. "
+        "Une suite de <b>14 scénarios</b> couvrant différents types de fautes et niveaux de sévérité "
+        "est versionnée avec le dépôt afin d'assurer la <b>reproductibilité</b> des campagnes de test."))
     s.append(C.callout(
-        "<b>Contrainte de correction :</b> les fautes injectées sont le <i>jeu de test</i>, jamais "
-        "des données d'entraînement. Le job d'entraînement exclut les fenêtres d'injection de "
-        "l'historique sur lequel il ajuste le modèle. Entraîner sur des fautes injectées serait "
-        "une violation de correction.", kind="key"))
+        "<b>POINT CLÉ — Séparation entraînement/évaluation :</b> Les fautes injectées sont utilisées "
+        "uniquement pour tester le détecteur et sont exclues des données d'entraînement. "
+        "Le modèle est entraîné uniquement sur des périodes normales afin d'éviter toute fuite de "
+        "données (<i>data leakage</i>) et garantir la validité de l'évaluation.", kind="key"))
     return s
 
 
@@ -313,23 +375,28 @@ def ch5():
 def ch6():
     s = [C.begin_chapter("Features et baseline saisonnière", S.SECONDARY), C.spacer(6)]
     s.append(C.subh("Fenêtres de features"))
+    s.append(D.features_window_pipeline())
+    s.append(C.spacer(6))
     s.append(C.para(
-        "Pour chaque endpoint et par minute : p50/p95/p99, taux 4xx et 5xx, RPS. Un agrégat "
-        "5 minutes, plus lisse, sert aux features de pente et de ratio. Les features dérivées "
-        "sont calculées à la lecture par le détecteur :"))
+        "Pour chaque endpoint et par minute : p50/p95/p99, taux 4xx et 5xx, RPS. Toutes les "
+        "métriques sont calculées sur une fenêtre glissante de 5 minutes dans Prometheus "
+        "(lissage intégré, même granularité pour toutes les features). "
+        "Les features dérivées sont calculées à la lecture par le détecteur :"))
     for b in C.bullets([
-        "<b>Pente de latence</b> : ajustement linéaire robuste (Theil-Sen) sur les K dernières fenêtres.",
+        "<b>Pente de latence</b> : ajustement linéaire robuste (Theil-Sen) sur les 10 dernières fenêtres (~10 min de contexte).",
         "<b>Ratio p99/p50</b> : signal d'étalement de la distribution.",
         "<b>Deltas court-terme</b> et <b>delta de RPS</b> (pour distinguer une dégradation d'un simple changement de charge).",
-        "<b>Déviations de baseline</b> par métrique (voir 6.2).",
+        "<b>Déviations de baseline</b> par métrique (voir 9.2) — pour chaque métrique "
+        "(p50, p95, p99), la valeur mesurée est comparée à la bande saisonnière "
+        "[p10, p90] du même endpoint à la même heure :",
     ]):
         s.append(b)
-    s.append(C.callout(
-        "Adaptation d'implémentation assumée : au lieu des <i>continuous aggregates</i> "
-        "TimescaleDB, un <font face='Courier'>scraper</font> interroge Prometheus toutes les 60 s "
-        "et alimente l'hypertable <font face='Courier'>endpoint_features</font>. La forme des "
-        "données (p50/p95/p99, 4xx/5xx, rps par endpoint et par minute) est identique.",
-        kind="tech"))
+    for b in C.bullets([
+        "Dans la bande [p10, p90] &rarr; déviation = <b>0</b>",
+        "Au-dessus de p90 &rarr; <b>(valeur &minus; p90) / (p90 &minus; p10)</b> &nbsp;<i>(positif = dégradation)</i>",
+        "Sous p10 &rarr; <b>(valeur &minus; p10) / (p90 &minus; p10)</b> &nbsp;<i>(négatif = amélioration)</i>",
+    ], style="bullet_sub"):
+        s.append(b)
     s.append(C.subh("Baseline saisonnière conditionnée"))
     s.append(C.para(
         "Pour chaque endpoint et chaque métrique, on maintient des quantiles conditionnels "
@@ -342,15 +409,10 @@ def ch6():
     ]):
         s.append(b)
     s.append(C.para(
-        "<b>Cold start :</b> un bucket (jour x heure) avec trop peu d'échantillons se replie sur "
-        "les quantiles toutes-heures de l'endpoint, puis sur les quantiles globaux par métrique, "
-        "jusqu'à accumuler assez d'historique. Aucune couche de clustering n'est nécessaire."))
-    s.append(C.callout(
-        "<b>Hygiène de baseline mesurée :</b> calculée sur des données incluant les fautes, la "
-        "p90 gonfle à 1391 ms ; en excluant les injections, elle retombe à 317 ms. Sans cette "
-        "exclusion, le <i>direction gating</i> classerait la dégradation en « normal » "
-        "et les couches 1/2 se tairaient. C'est pourquoi <font face='Courier'>baseline_job</font> "
-        "et <font face='Courier'>train_model</font> excluent les injections.", kind="key"))
+        "<b>Cold start :</b> si le bucket exact (dow, hour) est absent ou insuffisant "
+        "(<font face='Courier'>sample_count &lt; 10</font>), le fallback agrège "
+        "min(p10) / avg(p50) / max(p90) sur tous les buckets disponibles du même "
+        "endpoint et de la même métrique. Aucune couche de clustering n'est nécessaire."))
     return s
 
 
@@ -631,7 +693,7 @@ def ch12():
         "maîtrisé sur le taux de faux positifs. Le protocole la rend directement mesurable."))
     s.append(C.subh("Protocole"))
     for b in C.bullets([
-        "Exécuter la suite standard (~20 scénarios) avec les détecteurs <b>statique (Layer 0) et "
+        "Exécuter la suite standard (14 scénarios) avec les détecteurs <b>statique (Layer 0) et "
         "en couches actifs en parallèle</b>.",
         "Rapprocher les alertes des fenêtres d'injection : un <b>vrai positif</b> est une alerte "
         "FIRING sur l'endpoint cible chevauchant (ou dans un délai de grâce) la fenêtre "

@@ -87,6 +87,10 @@ def build_styles():
         "bullet", parent=styles["body"], leftIndent=14, bulletIndent=2,
         spaceAfter=4, alignment=TA_LEFT,
     )
+    styles["bullet_sub"] = ParagraphStyle(
+        "bullet_sub", parent=styles["body"], leftIndent=32, bulletIndent=18,
+        spaceAfter=2, fontSize=9, alignment=TA_LEFT,
+    )
 
     # Encadres (definitions, choix techniques, points cles)
     styles["callout_title"] = ParagraphStyle(

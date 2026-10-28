@@ -34,7 +34,7 @@ import psycopg2
 
 import ml_model
 from features import compute_features, vectorize, WINDOW_SIZE, MIN_WINDOW
-from baseline_utils import pg_dow
+import season
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -124,8 +124,11 @@ def baseline_lookup_from_rows(rows):
 
 
 def baseline_for(exact, fallback, endpoint_id, dt):
-    """Baselines {metric: (p10,p50,p90)} pour un point, bucket exact puis fallback."""
-    dow, hour = pg_dow(dt), dt.hour
+    """
+    Baselines {metric: (p10,p50,p90)} pour un point, bucket exact puis fallback.
+    Case (dow, heure) = horloge season de l'instant de la MESURE dt.
+    """
+    dow, hour = season.slot(dt)
     out = {}
     for m in BASELINE_METRICS:
         b = exact.get((endpoint_id, m, dow, hour))

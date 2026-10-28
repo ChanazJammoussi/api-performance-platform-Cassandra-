@@ -12,7 +12,8 @@ ne passe pas les controles est "impossible", jamais "reussie".
 Format officiel d'une campagne (scenario-runner/run_evaluation_suite.py) :
   campaign_AAAAMMJJ_HHMM/
     manifest.json        campaign_id, started_at, commit_sha, scenarios, ...,
-                         feature_fingerprint, baseline_fingerprint, completed_at
+                         feature_fingerprint, baseline_fingerprint, season,
+                         completed_at
     summary.json         une entree par execution (scenario, tier, status, ...)
     baseline_snapshot.json
     ground_truth/<scenario>_<tier>_<ts>.json   (format scenario-runner/runner.py)
@@ -27,6 +28,8 @@ import re
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import season
 
 CAMPAIGN_NAME_RE = re.compile(r"^campaign_\d{8}_\d{4}$")
 TIERS = ("core", "stress")
@@ -197,9 +200,110 @@ def _check_fingerprints(d, manifest, features_py, reasons):
     if not snap_reasons and manifest.get("baseline_row_count") != len(rows):
         reasons.append(f"manifest.json : baseline_row_count ({manifest.get('baseline_row_count')}) "
                        f"different du nombre de lignes de l'instantane ({len(rows)})")
+    if not snap_reasons and isinstance(manifest.get("season", {}), dict):
+        mode = (manifest.get("season") or season.describe(season.REEL)).get("mode")
+        if mode in season.MODES:
+            reasons.extend(season.rows_mode_reasons(rows, mode))
 
 
-def check_campaign(campaign_dir, now=None, require_completed=True, features_py=None):
+def _check_season(manifest, current, reasons):
+    """
+    Mode saisonnier de la campagne (absent = reel, campagnes anterieures) : bien
+    forme et identique au mode actuel. Un mode different rend la campagne
+    impossible a evaluer (baseline et modele sur une autre horloge).
+    """
+    s = manifest.get("season")
+    if s is not None and (not isinstance(s, dict) or s.get("mode") not in season.MODES):
+        reasons.append(f"manifest.json : season invalide ({s!r})")
+        return
+    if not season.same_mode(s, current):
+        reasons.append(f"manifest.json : mode saisonnier de la campagne "
+                       f"{(s or season.describe(season.REEL))!r} different du mode actuel {current!r}")
+
+
+def season_mode_reasons(manifest, current=None):
+    """
+    Raisons pour lesquelles une campagne existante ne peut pas etre reprise dans le
+    mode actuel (G3) : vide = meme mode. current : defaut season.describe().
+    """
+    reasons = []
+    if not isinstance(manifest, dict):
+        return ["manifest.json : objet attendu"]
+    _check_season(manifest, season.describe() if current is None else current, reasons)
+    return reasons
+
+
+# ---------------------------------------------------------------------------
+# Cible d'une campagne : mode explicite et dossier de sortie (G1 / G2)
+# ---------------------------------------------------------------------------
+
+COMPRESSE_SUBDIR = "compresse"   # results/compresse/ : reserve au mode compresse
+
+# Services requis pendant une campagne : conteneurs Docker en marche (noms exacts
+# de docker-compose.yml) + un conteneur de trafic k6 (nom contenant "k6", ex.
+# cassandra-k6-compresse de scripts/run_compressed_days.sh).
+REQUIRED_CONTAINERS = ("cassandra-scraper", "cassandra-detector")
+
+
+def running_services(names):
+    """[(service, en_marche)] a partir des noms de conteneurs en marche (docker ps)."""
+    names = set(names)
+    return ([(c, c in names) for c in REQUIRED_CONTAINERS]
+            + [("k6", any("k6" in n for n in names))])
+
+
+class CampaignTargetError(ValueError):
+    """Lancement de campagne refuse avant toute ecriture (mode ou dossier incoherent)."""
+
+
+def _is_within(path, root):
+    """path est-il root ou l'un de ses sous-dossiers ? (chemins deja resolus)"""
+    return path == root or root in path.parents
+
+
+def campaign_target(env, results_dir, results_root, process_mode):
+    """
+    Mode et dossier de sortie d'une campagne, ou CampaignTargetError.
+      G1 : SEASON_MODE doit etre defini et non vide dans env (environnement APRES
+           chargement du .env), valide, et egal a process_mode (mode lu par season
+           au demarrage du processus, avant le .env) : sinon la campagne serait
+           ecrite dans un mode et son manifeste dans un autre.
+      G2 : results_dir None -> results_root (reel) ou results_root/compresse
+           (compresse). Mode compresse : dossier obligatoirement dans
+           results_root/compresse ; mode reel : results_root/compresse interdit.
+    Les chemins relatifs sont resolus depuis le dossier courant (comme avant).
+    Renvoie (mode, dossier resolu). Ne cree rien.
+    """
+    raw = env.get("SEASON_MODE")
+    if raw is None or not raw.strip():
+        raise CampaignTargetError("SEASON_MODE non defini : indiquez SEASON_MODE=reel ou "
+                                  "SEASON_MODE=compresse dans l'environnement de la commande")
+    try:
+        mode = season.mode_from_env({"SEASON_MODE": raw})
+    except ValueError as e:
+        raise CampaignTargetError(str(e))
+    if mode != process_mode:
+        raise CampaignTargetError(
+            f"SEASON_MODE incoherent : {mode!r} apres chargement du .env, mais {process_mode!r} "
+            f"au demarrage du processus (definissez SEASON_MODE dans l'environnement de la "
+            f"commande, pas dans .env)")
+    root = Path(results_root).resolve()
+    reserved = (root / COMPRESSE_SUBDIR).resolve()
+    if results_dir is None:
+        target = reserved if mode == season.COMPRESSE else root
+    else:
+        target = Path(results_dir).resolve()
+    inside = _is_within(target, reserved)
+    if mode == season.COMPRESSE and not inside:
+        raise CampaignTargetError(f"en mode compresse, les campagnes doivent etre ecrites sous "
+                                  f"{reserved} (dossier demande : {target})")
+    if mode == season.REEL and inside:
+        raise CampaignTargetError(f"{reserved} est reserve au mode compresse (dossier demande : "
+                                  f"{target})")
+    return mode, target
+
+
+def check_campaign(campaign_dir, now=None, require_completed=True, features_py=None, season_mode=None):
     """
     Controle complet d'une campagne au format officiel. Renvoie un dict :
       ok (bool), reasons (list), manifest, final_entries {(scenario, tier): entry},
@@ -207,7 +311,10 @@ def check_campaign(campaign_dir, now=None, require_completed=True, features_py=N
     require_completed=False : controle avant finalisation (completed_at pas encore ecrit).
     features_py : chemin de features.py du code actuel ; si fourni, les features de
                   la campagne doivent etre identiques (noms et ordre).
+    season_mode : description du mode saisonnier attendu (defaut : season.describe(),
+                  mode du processus). Le manifeste doit avoir le meme mode.
     """
+    current_season = season.describe() if season_mode is None else season_mode
     d = Path(campaign_dir)
     reasons = []
     out = {"ok": False, "reasons": reasons, "manifest": None, "final_entries": {}, "windows": []}
@@ -251,6 +358,7 @@ def check_campaign(campaign_dir, now=None, require_completed=True, features_py=N
                 else:
                     scenarios = sc
             _check_fingerprints(d, manifest, features_py, reasons)
+            _check_season(manifest, current_season, reasons)
             if require_completed:
                 if "completed_at" not in manifest:
                     reasons.append("manifest.json : completed_at absent (campagne non finalisee)")
@@ -504,22 +612,9 @@ def window_list_fingerprint(windows):
     return _sha256_json(canon)
 
 
-def _pg_dow(dt):
-    """Jour de semaine convention PostgreSQL EXTRACT(DOW) : 0 = dimanche."""
-    return (dt.weekday() + 1) % 7
-
-
 def _hour_slots(start, end):
-    """Creneaux (dow, heure) UTC touches par [start, end]."""
-    slots = []
-    t = start.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
-    end = end.astimezone(timezone.utc)
-    while t <= end:
-        slot = (_pg_dow(t), t.hour)
-        if slot not in slots:
-            slots.append(slot)
-        t += timedelta(hours=1)
-    return slots
+    """Creneaux (dow, heure) touches par [start, end] : horloge unique season.py."""
+    return season.slots_between(start, end)
 
 
 def _band_is_valid(p10, p90):

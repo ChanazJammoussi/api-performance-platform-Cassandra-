@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cassandra — Point d'avancement de projet</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,wght@0,300;0,400;0,600;1,400&family=Source+Sans+3:wght@400;600&display=swap');
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Source Serif 4', Georgia, serif;
+      font-size: 11pt;
+      line-height: 1.65;
+      color: #1a1a1a;
+      background: #fff;
+    }
+
+    .page {
+      max-width: 165mm;
+      margin: 0 auto;
+      padding: 22mm 0 20mm 0;
+    }
+
+    /* ---- En-tête ---- */
+    .header {
+      border-bottom: 2px solid #1a3a5c;
+      padding-bottom: 10px;
+      margin-bottom: 22px;
+    }
+    .header h1 {
+      font-family: 'Source Sans 3', Arial, sans-serif;
+      font-size: 17pt;
+      font-weight: 600;
+      color: #1a3a5c;
+      letter-spacing: 0.02em;
+    }
+    .header .subtitle {
+      font-family: 'Source Sans 3', Arial, sans-serif;
+      font-size: 10pt;
+      color: #555;
+      margin-top: 3px;
+    }
+
+    /* ---- Sections ---- */
+    h2 {
+      font-family: 'Source Sans 3', Arial, sans-serif;
+      font-size: 11.5pt;
+      font-weight: 600;
+      color: #1a3a5c;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-top: 22px;
+      margin-bottom: 7px;
+      padding-bottom: 3px;
+      border-bottom: 1px solid #c8d8e8;
+    }
+
+    p {
+      margin-bottom: 9px;
+      text-align: justify;
+      hyphens: auto;
+    }
+
+    /* ---- Tableau ---- */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-family: 'Source Sans 3', Arial, sans-serif;
+      font-size: 9.5pt;
+      margin: 10px 0 12px 0;
+    }
+    thead tr {
+      background: #1a3a5c;
+      color: #fff;
+    }
+    thead th {
+      padding: 5px 8px;
+      text-align: left;
+      font-weight: 600;
+    }
+    tbody tr:nth-child(even) { background: #f2f6fa; }
+    tbody tr:nth-child(odd)  { background: #fff; }
+    tbody td {
+      padding: 4px 8px;
+      border-bottom: 1px solid #dde6ef;
+    }
+    tbody td:first-child { font-weight: 600; }
+
+    /* ---- Listes ---- */
+    ul {
+      padding-left: 18px;
+      margin-bottom: 9px;
+    }
+    li {
+      margin-bottom: 3px;
+    }
+
+    strong { font-weight: 600; }
+
+    /* ---- Pied de page ---- */
+    .footer {
+      margin-top: 28px;
+      padding-top: 8px;
+      border-top: 1px solid #c8d8e8;
+      font-family: 'Source Sans 3', Arial, sans-serif;
+      font-size: 8.5pt;
+      color: #888;
+      text-align: center;
+    }
+
+    @media print {
+      body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      .page { padding: 0; }
+      h2 { page-break-after: avoid; }
+      table, p { page-break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+<div class="page">
+
+  <div class="header">
+    <h1>Cassandra &mdash; Plateforme d&rsquo;observabilit&eacute; intelligente</h1>
+    <div class="subtitle">Point d&rsquo;avancement de projet &nbsp;&bull;&nbsp; Chanaz Jammoussi &nbsp;&bull;&nbsp; Juillet 2026</div>
+  </div>
+
+  <h2>Contexte et objectif</h2>
+  <p>
+    Ce projet de stage vise à concevoir et implémenter <strong>Cassandra</strong>, une plateforme
+    d&rsquo;observabilité intelligente dédiée à la détection automatique des dégradations de
+    performance d&rsquo;API. L&rsquo;enjeu de départ est concret : les équipes opérationnelles
+    s&rsquo;appuient aujourd&rsquo;hui majoritairement sur des seuils statiques pour déclencher
+    leurs alertes. Cette approche, bien qu&rsquo;immédiate à mettre en place, souffre de deux
+    limites structurelles — un taux élevé de faux positifs lorsque les seuils sont trop sensibles,
+    et des manques de détection lorsqu&rsquo;ils sont trop permissifs — sans jamais fournir
+    d&rsquo;explication sur la cause probable d&rsquo;un incident.
+  </p>
+  <p>
+    L&rsquo;objectif de Cassandra est triple : <strong>détecter</strong> les dégradations de
+    latence et de taux d&rsquo;erreur par endpoint API, <strong>les attribuer</strong> à des
+    événements de déploiement probables, et <strong>les expliquer</strong> en langage naturel pour
+    faciliter le diagnostic. La thèse centrale du projet est quantitative : prouver, par une
+    évaluation rigoureuse avec injection de fautes contrôlée, qu&rsquo;une approche en couches
+    (baseline saisonnière + détection non supervisée) offre de meilleures performances de
+    détection que le seuillage statique, à coût de faux positifs maîtrisé.
+  </p>
+
+  <h2>Architecture et technologies</h2>
+  <p>
+    La plateforme s&rsquo;articule autour d&rsquo;un pipeline en sept étapes, entièrement
+    conteneurisé via Docker Compose pour en garantir la reproductibilité. Le trafic synthétique
+    est généré par <strong>k6</strong> vers trois microservices de démonstration (gateway, orders,
+    payments), instrumentés avec <strong>OpenTelemetry</strong>. Les traces OTLP sont acheminées
+    vers un <strong>OTel Collector</strong> qui calcule en temps réel les métriques RED (Rate,
+    Errors, Duration) via son connecteur <em>spanmetrics</em>, puis les expose à
+    <strong>Prometheus</strong>. Un module de scraping interroge Prometheus toutes les 60 secondes
+    pour alimenter les tables de features dans <strong>TimescaleDB</strong>, une base de données
+    temporelle PostgreSQL haute performance. L&rsquo;ensemble des données analytiques réside dans
+    TimescaleDB, dont la compression native réduit l&rsquo;empreinte d&rsquo;un facteur environ 6
+    sur les données historiques. La visualisation est assurée par <strong>Grafana</strong>, les
+    notifications sont envoyées vers <strong>Slack</strong>, et le projet compte 68 tests unitaires
+    avec intégration continue sur GitHub Actions.
+  </p>
+
+  <h2>Fonctionnalités implémentées</h2>
+  <p>
+    <strong>Collecte et stockage des métriques.</strong> Le scraper extrait les percentiles de
+    latence (p50, p95, p99), le taux d&rsquo;erreurs et le débit par endpoint depuis Prometheus,
+    puis les persiste dans TimescaleDB.
+  </p>
+  <p>
+    <strong>Construction automatique d&rsquo;une baseline saisonnière.</strong> Un job de baseline
+    calcule, pour chaque couple (endpoint, jour de la semaine &times; heure), les quantiles
+    p10/p50/p90 à partir de l&rsquo;historique, avec un mécanisme de cold-start pour les
+    endpoints récents.
+  </p>
+  <p>
+    <strong>Détection en couches.</strong> C&rsquo;est le composant central du projet, combinant
+    trois couches indépendantes :
+  </p>
+  <ul>
+    <li><em>Layer 0 (statique)</em> : déclenchement immédiat si une métrique dépasse un SLO prédéfini ;</li>
+    <li><em>Layer 1 (baseline)</em> : comparaison avec la bande saisonnière attendue, produisant un
+        score de déviation normalisé et une <strong>direction</strong> (dégradation vs amélioration) ;</li>
+    <li><em>Layer 2 (Isolation Forest)</em> : détection non supervisée multivariée sur des features
+        endpoint-relatives (déviations de baseline, ratio p99/p50, pente Theil-Sen, delta de débit).
+        La contribution de cette couche est <strong>conditionnée par la direction</strong> issue de la
+        couche&nbsp;1, évitant qu&rsquo;une performance anormalement bonne ne déclenche une alerte.</li>
+  </ul>
+  <p>
+    Le score combiné est un blend calibré des couches 1 et 2, avec un seuil de déclenchement fixé
+    à 0,60, déterminé empiriquement comme le point de F1 maximal.
+  </p>
+  <p>
+    <strong>Machine à états d&rsquo;alerte.</strong> Les alertes suivent un cycle de vie à cinq
+    états (OK → Pending → Firing → Resolving → OK), avec hystérésis montante et descendante pour
+    prévenir le flapping. Seule la transition vers l&rsquo;état Firing déclenche la corrélation et
+    l&rsquo;explication LLM, ce qui maîtrise le coût opérationnel et le bruit.
+  </p>
+  <p>
+    <strong>Corrélation avec les déploiements.</strong> Un registre de déploiements (exposé via une
+    API REST) permet d&rsquo;associer temporellement chaque dégradation détectée à un événement
+    récent dans une fenêtre causale de 30 minutes, avec un score de corrélation.
+  </p>
+  <p>
+    <strong>Explication par LLM.</strong> Lorsqu&rsquo;une alerte passe en Firing, le moteur
+    d&rsquo;explication soumet le contexte structuré de l&rsquo;anomalie à un grand modèle de
+    langage (Google Gemini), qui génère un résumé d&rsquo;incident en langage naturel : cause
+    suspectée, écart mesuré par rapport à la baseline, top-3 des features contributrices, et
+    vérifications recommandées. Un mécanisme de fallback basé sur des templates garantit la
+    continuité en cas d&rsquo;indisponibilité du LLM.
+  </p>
+  <p>
+    <strong>Cycle de vie du modèle ML.</strong> Un job nightly réentraîne l&rsquo;Isolation Forest
+    sur l&rsquo;historique glissant, en excluant strictement les fenêtres d&rsquo;injection de
+    fautes (jeu de test). Le nouveau modèle n&rsquo;est promu qu&rsquo;après validation par une
+    <em>sanity gate</em> vérifiant l&rsquo;absence de dérive de la distribution des scores. Les
+    artefacts sont versionnés par horodatage.
+  </p>
+  <p>
+    <strong>Injection de fautes et évaluation.</strong> Cinq types de pannes contrôlées ont été
+    développés (dégradation progressive, échelon de latence, burst d&rsquo;erreurs, propagation
+    downstream, contention de pool). Chaque injection constitue une étiquette de vérité terrain
+    exploitée par le module d&rsquo;évaluation, qui mesure précision, rappel, F1-score, taux de
+    faux positifs par heure et délai de détection médian, en comparaison directe entre l&rsquo;approche
+    statique et l&rsquo;approche en couches.
+  </p>
+
+  <h2>Résultats obtenus</h2>
+  <p>
+    L&rsquo;évaluation menée sur une campagne de 31 injections réparties en 20 scénarios établit
+    les chiffres suivants :
+  </p>
+  <table>
+    <thead>
+      <tr>
+        <th>Métrique</th>
+        <th>Seuillage statique (Layer 0)</th>
+        <th>Détecteur en couches</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>Taux de détection global</td><td>65 %</td><td>71 %</td></tr>
+      <tr><td>Faux positifs / heure</td><td>1,13</td><td>1,29</td></tr>
+      <tr><td>Délai de détection médian</td><td>&mdash;</td><td>124 s</td></tr>
+    </tbody>
+  </table>
+  <p>
+    Le gain le plus net concerne les dégradations progressives par échelon : le taux de détection
+    passe de 80&nbsp;% à 100&nbsp;%, pour un surcoût de faux positifs modeste de +0,16 FP/heure.
+    Par ailleurs, la comparaison supervisé vs non supervisé (PR-AUC quasi identique entre
+    Isolation Forest et gradient boosting) confirme que le choix non supervisé est pleinement
+    justifié, sans exiger d&rsquo;historique d&rsquo;incidents labellisés. La qualité des
+    explications LLM a été évaluée sur une rubrique à six critères (structure, cohérence des
+    chiffres, actionnabilité, cadrage de l&rsquo;incertitude) et obtient un score moyen de
+    <strong>5,00/6</strong>. Enfin, l&rsquo;attribution de déploiement identifie le bon commit en
+    moins de cinq minutes avec un score de corrélation d&rsquo;environ 0,9 sur le scénario
+    de référence.
+  </p>
+
+  <h2>Travaux en cours</h2>
+  <p>
+    Plusieurs axes sont actuellement en progression : approfondissement de l&rsquo;analyse
+    comparative entre l&rsquo;approche statique et l&rsquo;approche en couches, notamment pour
+    mieux caractériser les conditions dans lesquelles le layered apporte le plus de valeur ;
+    enrichissement du monitoring interne de la plateforme pour affiner la supervision de ses
+    propres performances opérationnelles ; finalisation de la documentation technique ; et
+    préparation de la démonstration finale bout-en-bout.
+  </p>
+
+  <h2>Prochaines étapes</h2>
+  <p>
+    À court terme : consolider le bilan d&rsquo;évaluation avec des scénarios supplémentaires,
+    explorer l&rsquo;intégration de métriques de saturation comme features optionnelles pour
+    améliorer la détection des fautes de contention subtiles, et finaliser la présentation de
+    soutenance. À plus long terme, l&rsquo;alerte précoce — estimation du délai avant
+    dépassement du SLO par extrapolation de tendance — est identifiée comme un axe
+    d&rsquo;extension naturel, déjà partiellement implémenté à titre exploratoire.
+  </p>
+
+  <div class="footer">
+    Cassandra &mdash; Rapport d&rsquo;avancement &bull; Chanaz Jammoussi &bull; Juillet 2026 &bull;
+    Référence : <em>docs/design-spec.md</em> &amp; <em>docs/architecture.md</em>
+  </div>
+
+</div>
+</body>
+</html>

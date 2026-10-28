@@ -385,7 +385,7 @@
           "rawQuery": true,
           "format": "table",
           "refId": "A",
-          "rawSql": "SELECT fault_type, n, round((dr_static*100)::numeric,0) AS \"DR static %\", round((dr_layered*100)::numeric,0) AS \"DR layered %\", round(delay_static_s::numeric,0) AS \"delai static (s)\", round(delay_layered_s::numeric,0) AS \"delai layered (s)\" FROM eval_runs WHERE run_id=(SELECT run_id FROM eval_runs ORDER BY run_at DESC LIMIT 1) ORDER BY (fault_type='OVERALL'), fault_type"
+          "rawSql": "SELECT fault_type, n, round((dr_static*100)::numeric,0) AS \"DR static %\", round((dr_layered*100)::numeric,0) AS \"DR layered %\", round(delay_static_s::numeric,0) AS \"delai static (s)\", round(delay_layered_s::numeric,0) AS \"delai layered (s)\" FROM eval_runs WHERE magnitude='all' AND run_id=(SELECT run_id FROM eval_runs ORDER BY run_at DESC LIMIT 1) ORDER BY (fault_type='OVERALL'), fault_type"
         }
       ]
     },

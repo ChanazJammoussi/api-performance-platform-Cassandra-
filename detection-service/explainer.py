@@ -29,6 +29,7 @@ from dotenv import load_dotenv
 from google import genai
 
 from baseline_utils import get_baseline, ENDPOINT_SLOS, DEFAULT_SLOS
+import season
 
 load_dotenv()
 
@@ -104,15 +105,18 @@ def _get_current_alert(cur, endpoint_id, signal_type):
     }
 
 
-def build_context(cur, endpoint_id: str, signal_type: str, now: datetime) -> dict:
+def build_context(cur, endpoint_id: str, signal_type: str, now: datetime,
+                  measured_at: datetime | None = None) -> dict:
     """
     Assemble le payload structure envoye au LLM.
 
     Reutilise get_baseline() de detector.py pour garantir la coherence avec
-    la baseline effectivement utilisee par le detecteur au moment de la decision.
+    la baseline effectivement utilisee par le detecteur au moment de la decision :
+    meme case (dow, heure) via season.slot, a l'instant de la MESURE (measured_at,
+    defaut now). Corrige l'ancien now.weekday() (0 = lundi) qui ne suivait pas la
+    convention PostgreSQL de la baseline (0 = dimanche).
     """
-    dow = now.weekday()
-    hour = now.hour
+    dow, hour = season.slot(measured_at or now)
 
     alert = _get_current_alert(cur, endpoint_id, signal_type)
     if alert is None:
@@ -386,11 +390,13 @@ def _fallback_explanation(context: dict) -> dict:
 # Orchestration + persistence
 # ---------------------------------------------------------------------------
 
-def generate_explanation(cur, endpoint_id: str, signal_type: str, now: datetime) -> dict:
+def generate_explanation(cur, endpoint_id: str, signal_type: str, now: datetime,
+                         measured_at: datetime | None = None) -> dict:
     """
     Point d'entree principal. Assemble le contexte, appelle le LLM, et retombe
     sur un template deterministe en cas d'echec. Ecrit toujours le resultat
-    dans alerts.explanation (jsonb).
+    dans alerts.explanation (jsonb). measured_at : instant de la mesure qui a
+    declenche l'alerte (case de baseline) ; now reste l'heure de decision.
     """
     # Garde-fou : ne jamais appeler Gemini deux fois pour la meme alerte
     cur.execute("""
@@ -402,7 +408,7 @@ def generate_explanation(cur, endpoint_id: str, signal_type: str, now: datetime)
         log.info(f"Explanation already exists for {endpoint_id}/{signal_type}, skipping LLM call")
         return row[0]
 
-    context = build_context(cur, endpoint_id, signal_type, now)
+    context = build_context(cur, endpoint_id, signal_type, now, measured_at)
 
     explanation = call_llm(context)
     if explanation is None:

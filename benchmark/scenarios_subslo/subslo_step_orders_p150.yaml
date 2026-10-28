@@ -1,0 +1,11 @@
+id: subslo_step_orders_p150
+description: "Sous-SLO : +150ms sur orders (p99 attendu ~245 < SLO 300). Deuxieme magnitude
+  pour robustesse. Static ne doit PAS detecter ; Layered devrait detecter."
+faults:
+  - service: orders
+    type: latency_step
+    target_endpoint: "GET /orders/{order_id}"
+    params:
+      latency_ms: 150
+    duration_seconds: 300
+    wait_before_seconds: 5

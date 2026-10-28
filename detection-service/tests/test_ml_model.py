@@ -295,3 +295,30 @@ def test_sanity_gate_strict_compare_normalement(trained):
     model, X = trained
     ok, report = ml_model.sanity_gate(model, {"model": model}, X[:50], strict=True)
     assert ok is True and report["ks"] == pytest.approx(0.0, abs=1e-9)
+
+
+# --- mode saisonnier du modele (season.py) ------------------------------------
+
+import season  # noqa: E402
+
+
+def test_meta_inscrit_le_mode_saisonnier(trained):
+    assert _bundle(*trained)["meta"]["season"] == {"mode": "reel"}
+
+
+def test_modele_d_un_autre_mode_refuse(trained, monkeypatch):
+    b = _bundle(*trained)                                  # entraine en mode reel
+    monkeypatch.setattr(season, "MODE", season.COMPRESSE)
+    assert any("meta.season" in p for p in ml_model.check_bundle_compat(b))
+    c = _bundle(*trained)                                  # entraine en mode compresse
+    assert ml_model.check_bundle_compat(c) == []
+    monkeypatch.setattr(season, "MODE", season.REEL)
+    assert any("meta.season" in p for p in ml_model.check_bundle_compat(c))
+
+
+def test_artefact_anterieur_sans_mode(trained, monkeypatch):
+    b = _bundle(*trained)
+    del b["meta"]["season"]
+    assert ml_model.check_bundle_compat(b) == []          # considere comme mode reel
+    monkeypatch.setattr(season, "MODE", season.COMPRESSE)
+    assert any("meta.season" in p for p in ml_model.check_bundle_compat(b))

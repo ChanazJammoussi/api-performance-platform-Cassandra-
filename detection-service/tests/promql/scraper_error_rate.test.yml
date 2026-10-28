@@ -1,0 +1,173 @@
+# Tests promtool de la formule d'erreurs du scraper (detection-service/scraper.py, audit du 27/10).
+# Execution (plus tard, sur autorisation ; rien a installer si promtool est dans l'image) :
+#   cd <depot> && MSYS_NO_PATHCONV=1 docker run --rm --network none \
+#     -v "$(pwd -W)/detection-service/tests/promql:/t:ro" \
+#     --entrypoint promtool prom/prometheus:v2.52.0 test rules /t/scraper_error_rate.test.yml
+# Les expressions sont exactement celles de fetch_features() (verifie par
+# tests/test_scraper_errors.py::test_promtool_utilise_les_requetes_du_scraper).
+# Un echantillon par minute (comme le collecteur). Valeurs attendues = appels entre deux
+# echantillons, pas un taux sur 5 min exactes.
+rule_files: []
+evaluation_interval: 1m
+
+tests:
+  # 1. Serie presente : 100 (10m) - 50 (5m)
+  - interval: 1m
+    input_series:
+      - series: 'calls_total{span_kind="SPAN_KIND_SERVER", service_name="orders", http_route="/orders", http_status_code="200", status_code="STATUS_CODE_UNSET"}'
+        values: '0+10x20'
+    promql_expr_test:
+      - expr: 'sum without(http_status_code, status_code) (((calls_total{span_kind="SPAN_KIND_SERVER"} - last_over_time(calls_total{span_kind="SPAN_KIND_SERVER"}[6h] offset 5m)) >= 0) or calls_total{span_kind="SPAN_KIND_SERVER"})'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{span_kind="SPAN_KIND_SERVER", service_name="orders", http_route="/orders"}'
+            value: 50
+
+  # 2. Serie qui apparait deja a 9 (5m) : comptee tant qu'aucun echantillon n'est avant la fenetre,
+  #    puis 9 - 9 = 0
+  - interval: 1m
+    input_series:
+      - series: 'calls_total{span_kind="SPAN_KIND_SERVER", service_name="orders", http_route="/orders", http_status_code="500", status_code="STATUS_CODE_ERROR"}'
+        values: '_ _ _ _ _ 9x10'
+    promql_expr_test:
+      - expr: 'sum without(http_status_code, status_code) (((calls_total{span_kind="SPAN_KIND_SERVER", http_status_code=~"5.."} - last_over_time(calls_total{span_kind="SPAN_KIND_SERVER", http_status_code=~"5.."}[6h] offset 5m)) >= 0) or calls_total{span_kind="SPAN_KIND_SERVER", http_status_code=~"5.."})'
+        eval_time: 9m
+        exp_samples:
+          - labels: '{span_kind="SPAN_KIND_SERVER", service_name="orders", http_route="/orders"}'
+            value: 9
+      - expr: 'sum without(http_status_code, status_code) (((calls_total{span_kind="SPAN_KIND_SERVER", http_status_code=~"5.."} - last_over_time(calls_total{span_kind="SPAN_KIND_SERVER", http_status_code=~"5.."}[6h] offset 5m)) >= 0) or calls_total{span_kind="SPAN_KIND_SERVER", http_status_code=~"5.."})'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{span_kind="SPAN_KIND_SERVER", service_name="orders", http_route="/orders"}'
+            value: 0
+
+  # 3. Remise a zero (100 a 10m, 0 a 11m) : 6 - 80 < 0 -> 6 (vrai : 26, sous-estimation)
+  - interval: 1m
+    input_series:
+      - series: 'calls_total{span_kind="SPAN_KIND_SERVER", service_name="orders", http_route="/orders", http_status_code="200", status_code="STATUS_CODE_UNSET"}'
+        values: '0+10x10 0+3x10'
+    promql_expr_test:
+      - expr: 'sum without(http_status_code, status_code) (((calls_total{span_kind="SPAN_KIND_SERVER"} - last_over_time(calls_total{span_kind="SPAN_KIND_SERVER"}[6h] offset 5m)) >= 0) or calls_total{span_kind="SPAN_KIND_SERVER"})'
+        eval_time: 13m
+        exp_samples:
+          - labels: '{span_kind="SPAN_KIND_SERVER", service_name="orders", http_route="/orders"}'
+            value: 6
+
+  # 4. LIMITE CONNUE (cas realiste : serie 5xx expiree par le collecteur apres 5 min sans
+  #    erreur, puis recreee en moins de 6 h) : la nouvelle serie (9 puis 12) est comparee a la
+  #    derniere valeur de l'ancienne (9) -> 0 puis 3, au lieu de 9 puis 12
+  - interval: 1m
+    input_series:
+      - series: 'calls_total{span_kind="SPAN_KIND_SERVER", service_name="orders", http_route="/orders", http_status_code="500", status_code="STATUS_CODE_ERROR"}'
+        values: '9 _ _ _ _ _ _ _ _ _ _ _ _ _ _ 9 12x4'
+    promql_expr_test:
+      - expr: 'sum without(http_status_code, status_code) (((calls_total{span_kind="SPAN_KIND_SERVER", http_status_code=~"5.."} - last_over_time(calls_total{span_kind="SPAN_KIND_SERVER", http_status_code=~"5.."}[6h] offset 5m)) >= 0) or calls_total{span_kind="SPAN_KIND_SERVER", http_status_code=~"5.."})'
+        eval_time: 15m
+        exp_samples:
+          - labels: '{span_kind="SPAN_KIND_SERVER", service_name="orders", http_route="/orders"}'
+            value: 0
+      - expr: 'sum without(http_status_code, status_code) (((calls_total{span_kind="SPAN_KIND_SERVER", http_status_code=~"5.."} - last_over_time(calls_total{span_kind="SPAN_KIND_SERVER", http_status_code=~"5.."}[6h] offset 5m)) >= 0) or calls_total{span_kind="SPAN_KIND_SERVER", http_status_code=~"5.."})'
+        eval_time: 16m
+        exp_samples:
+          - labels: '{span_kind="SPAN_KIND_SERVER", service_name="orders", http_route="/orders"}'
+            value: 3
+
+  # 5. 7 echantillons manquants (8 min entre 5m et 13m), compteur continu : 140 - 50, toute la coupure comprise
+  - interval: 1m
+    input_series:
+      - series: 'calls_total{span_kind="SPAN_KIND_SERVER", service_name="orders", http_route="/orders", http_status_code="200", status_code="STATUS_CODE_UNSET"}'
+        values: '0+10x5 _ _ _ _ _ _ _ 130+10x5'
+    promql_expr_test:
+      - expr: 'sum without(http_status_code, status_code) (((calls_total{span_kind="SPAN_KIND_SERVER"} - last_over_time(calls_total{span_kind="SPAN_KIND_SERVER"}[6h] offset 5m)) >= 0) or calls_total{span_kind="SPAN_KIND_SERVER"})'
+        eval_time: 14m
+        exp_samples:
+          - labels: '{span_kind="SPAN_KIND_SERVER", service_name="orders", http_route="/orders"}'
+            value: 90
+
+  # 6. 15 echantillons manquants (16 min entre 5m et 21m), compteur continu : 220 - 50 = 170 (jamais le cumul 220), puis 270 - 220
+  - interval: 1m
+    input_series:
+      - series: 'calls_total{span_kind="SPAN_KIND_SERVER", service_name="orders", http_route="/orders", http_status_code="200", status_code="STATUS_CODE_UNSET"}'
+        values: '0+10x5 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 210+10x10'
+    promql_expr_test:
+      - expr: 'sum without(http_status_code, status_code) (((calls_total{span_kind="SPAN_KIND_SERVER"} - last_over_time(calls_total{span_kind="SPAN_KIND_SERVER"}[6h] offset 5m)) >= 0) or calls_total{span_kind="SPAN_KIND_SERVER"})'
+        eval_time: 22m
+        exp_samples:
+          - labels: '{span_kind="SPAN_KIND_SERVER", service_name="orders", http_route="/orders"}'
+            value: 170
+      - expr: 'sum without(http_status_code, status_code) (((calls_total{span_kind="SPAN_KIND_SERVER"} - last_over_time(calls_total{span_kind="SPAN_KIND_SERVER"}[6h] offset 5m)) >= 0) or calls_total{span_kind="SPAN_KIND_SERVER"})'
+        eval_time: 27m
+        exp_samples:
+          - labels: '{span_kind="SPAN_KIND_SERVER", service_name="orders", http_route="/orders"}'
+            value: 50
+
+  # 7. LIMITE CONNUE : coupure de plus de 6 h, compteur continu : aucun echantillon dans les 6 h
+  #    -> cumul entier (3770) pendant environ 5 min, puis 3810 - 3760 = 50
+  - interval: 1m
+    input_series:
+      - series: 'calls_total{span_kind="SPAN_KIND_SERVER", service_name="orders", http_route="/orders", http_status_code="200", status_code="STATUS_CODE_UNSET"}'
+        values: '0+10x5 _x370 3760+10x10'
+    promql_expr_test:
+      - expr: 'sum without(http_status_code, status_code) (((calls_total{span_kind="SPAN_KIND_SERVER"} - last_over_time(calls_total{span_kind="SPAN_KIND_SERVER"}[6h] offset 5m)) >= 0) or calls_total{span_kind="SPAN_KIND_SERVER"})'
+        eval_time: 377m
+        exp_samples:
+          - labels: '{span_kind="SPAN_KIND_SERVER", service_name="orders", http_route="/orders"}'
+            value: 3770
+      - expr: 'sum without(http_status_code, status_code) (((calls_total{span_kind="SPAN_KIND_SERVER"} - last_over_time(calls_total{span_kind="SPAN_KIND_SERVER"}[6h] offset 5m)) >= 0) or calls_total{span_kind="SPAN_KIND_SERVER"})'
+        eval_time: 381m
+        exp_samples:
+          - labels: '{span_kind="SPAN_KIND_SERVER", service_name="orders", http_route="/orders"}'
+            value: 50
+
+  # 8. Serie qui disparait (dernier echantillon a 5m) : 50 - 30 a 8m, aucun resultat a 11m
+  - interval: 1m
+    input_series:
+      - series: 'calls_total{span_kind="SPAN_KIND_SERVER", service_name="orders", http_route="/orders", http_status_code="200", status_code="STATUS_CODE_UNSET"}'
+        values: '0+10x5'
+    promql_expr_test:
+      - expr: 'sum without(http_status_code, status_code) (((calls_total{span_kind="SPAN_KIND_SERVER"} - last_over_time(calls_total{span_kind="SPAN_KIND_SERVER"}[6h] offset 5m)) >= 0) or calls_total{span_kind="SPAN_KIND_SERVER"})'
+        eval_time: 8m
+        exp_samples:
+          - labels: '{span_kind="SPAN_KIND_SERVER", service_name="orders", http_route="/orders"}'
+            value: 20
+      - expr: 'sum without(http_status_code, status_code) (((calls_total{span_kind="SPAN_KIND_SERVER"} - last_over_time(calls_total{span_kind="SPAN_KIND_SERVER"}[6h] offset 5m)) >= 0) or calls_total{span_kind="SPAN_KIND_SERVER"})'
+        eval_time: 11m
+        exp_samples: []
+
+  # 9. Ratio : 100 * 100 / 500 = 20 %
+  - interval: 1m
+    input_series:
+      - series: 'calls_total{span_kind="SPAN_KIND_SERVER", service_name="orders", http_route="/orders", http_status_code="200", status_code="STATUS_CODE_UNSET"}'
+        values: '0+80x20'
+      - series: 'calls_total{span_kind="SPAN_KIND_SERVER", service_name="orders", http_route="/orders", http_status_code="500", status_code="STATUS_CODE_ERROR"}'
+        values: '0+20x20'
+    promql_expr_test:
+      - expr: '100 * sum without(http_status_code, status_code) (((calls_total{span_kind="SPAN_KIND_SERVER", http_status_code=~"5.."} - last_over_time(calls_total{span_kind="SPAN_KIND_SERVER", http_status_code=~"5.."}[6h] offset 5m)) >= 0) or calls_total{span_kind="SPAN_KIND_SERVER", http_status_code=~"5.."}) / sum without(http_status_code, status_code) (((calls_total{span_kind="SPAN_KIND_SERVER"} - last_over_time(calls_total{span_kind="SPAN_KIND_SERVER"}[6h] offset 5m)) >= 0) or calls_total{span_kind="SPAN_KIND_SERVER"})'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{span_kind="SPAN_KIND_SERVER", service_name="orders", http_route="/orders"}'
+            value: 20
+
+  # 10. Ratio avec serie 5xx qui apparait (8 erreurs a 10m) : 100 * 8 / (500 + 8)
+  - interval: 1m
+    input_series:
+      - series: 'calls_total{span_kind="SPAN_KIND_SERVER", service_name="orders", http_route="/orders", http_status_code="200", status_code="STATUS_CODE_UNSET"}'
+        values: '0+100x20'
+      - series: 'calls_total{span_kind="SPAN_KIND_SERVER", service_name="orders", http_route="/orders", http_status_code="500", status_code="STATUS_CODE_ERROR"}'
+        values: '_ _ _ _ _ _ _ _ 4+2x12'
+    promql_expr_test:
+      - expr: '100 * sum without(http_status_code, status_code) (((calls_total{span_kind="SPAN_KIND_SERVER", http_status_code=~"5.."} - last_over_time(calls_total{span_kind="SPAN_KIND_SERVER", http_status_code=~"5.."}[6h] offset 5m)) >= 0) or calls_total{span_kind="SPAN_KIND_SERVER", http_status_code=~"5.."}) / sum without(http_status_code, status_code) (((calls_total{span_kind="SPAN_KIND_SERVER"} - last_over_time(calls_total{span_kind="SPAN_KIND_SERVER"}[6h] offset 5m)) >= 0) or calls_total{span_kind="SPAN_KIND_SERVER"})'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{span_kind="SPAN_KIND_SERVER", service_name="orders", http_route="/orders"}'
+            value: 1.5748031496062993
+
+  # 11. Ratio sans aucune serie 5xx : aucun resultat (le scraper ecrit alors 0 %, requete reussie)
+  - interval: 1m
+    input_series:
+      - series: 'calls_total{span_kind="SPAN_KIND_SERVER", service_name="orders", http_route="/orders", http_status_code="200", status_code="STATUS_CODE_UNSET"}'
+        values: '0+10x20'
+    promql_expr_test:
+      - expr: '100 * sum without(http_status_code, status_code) (((calls_total{span_kind="SPAN_KIND_SERVER", http_status_code=~"5.."} - last_over_time(calls_total{span_kind="SPAN_KIND_SERVER", http_status_code=~"5.."}[6h] offset 5m)) >= 0) or calls_total{span_kind="SPAN_KIND_SERVER", http_status_code=~"5.."}) / sum without(http_status_code, status_code) (((calls_total{span_kind="SPAN_KIND_SERVER"} - last_over_time(calls_total{span_kind="SPAN_KIND_SERVER"}[6h] offset 5m)) >= 0) or calls_total{span_kind="SPAN_KIND_SERVER"})'
+        eval_time: 10m
+        exp_samples: []

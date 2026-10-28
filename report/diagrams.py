@@ -261,7 +261,70 @@ def service_dag(width=S.CONTENT_WIDTH):
 
 
 # --------------------------------------------------------------------------- #
-# Schema 6 — Organigramme simplifie de l'organisme d'accueil                   #
+# Schema 6 — Pipeline de features 9.1                                         #
+# --------------------------------------------------------------------------- #
+
+def features_window_pipeline(width=S.CONTENT_WIDTH):
+    """Prometheus -> scraper -> endpoint_features -> features derivees -> vecteur."""
+    h = 260
+    d = Drawing(width, h)
+    g = Group()
+    d.add(g)
+
+    cx   = width / 2
+    bh   = 36
+    bw_c = width * 0.46   # boite centrale large
+
+    # --- Ligne 1 : Prometheus ---
+    y1 = 215
+    box(g, cx - bw_c / 2, y1, bw_c, bh, "Prometheus", S.SECONDARY)
+    g.add(String(cx, y1 - 2, "metriques RED (spanmetrics)", fontName=S.FONT,
+                 fontSize=7, fillColor=S.MUTED, textAnchor="middle"))
+
+    # --- Fleche 1 -> 2 ---
+    arrow(g, cx, y1, cx, y1 - 28, label="PromQL, fenetre 5 min, toutes les 60 s")
+
+    # --- Ligne 2 : endpoint_features ---
+    y2 = 155
+    box(g, cx - bw_c / 2, y2, bw_c, bh,
+        "endpoint_features (hypertable)\np50 / p95 / p99 | rps | error_rate_4xx | error_rate_5xx",
+        S.GREEN, font_size=7.8)
+
+    # --- Fleche 2 -> 3 ---
+    arrow(g, cx, y2, cx, y2 - 28, label="10 dernieres fenetres (WINDOW_SIZE=10, ~10 min)")
+
+    # --- Ligne 3 : 4 boites de features derivees ---
+    y3   = 90
+    n    = 4
+    gap  = 8
+    bw_s = (width - (n - 1) * gap) / n
+    feats = [
+        ("Deviations baseline\nbaseline_dev\np50 / p95 / p99", S.PRIMARY),
+        ("Pente Theil-Sen\nlatency_slope\n(robuste aux outliers)", S.PURPLE),
+        ("Ratio p99/p50\np99_over_p50\n(etalement queue)", S.SECONDARY),
+        ("Taux erreur + RPS\nerror_rate_5xx\nrps_delta", S.GREEN),
+    ]
+    xs = []
+    for i, (label, col) in enumerate(feats):
+        x = i * (bw_s + gap)
+        xs.append(x)
+        box(g, x, y3, bw_s, bh + 14, label, col, font_size=7)
+        arrow(g, cx, y2, x + bw_s / 2, y3 + bh + 14)
+
+    # --- Fleches 3 -> 4 ---
+    y4 = 5
+    bw_v = width * 0.54
+    box(g, cx - bw_v / 2, y4, bw_v, 36,
+        "Vecteur de features (7 dim.) -> Isolation Forest (Layer 2)",
+        S.PURPLE, font_size=8)
+    for x in xs:
+        arrow(g, x + bw_s / 2, y3, cx - bw_v / 2 + bw_v * (xs.index(x) + 0.5) / n, y4 + 36)
+
+    return d
+
+
+# --------------------------------------------------------------------------- #
+# Schema 7 — Organigramme simplifie de l'organisme d'accueil                   #
 # --------------------------------------------------------------------------- #
 
 def org_chart(width=S.CONTENT_WIDTH):

@@ -50,7 +50,7 @@ pour un surcoût de faux positifs **modeste** (+0.16 FP/h).
 | **Tuning** | `contamination` **inerte** (n'affecte pas `score_samples`) ; seuil de déclenchement **0.60** = F1 max |
 | **Alerte précoce TTD** | Extrapolation Theil-Sen vers le SLO (advisory) |
 | **Compression TimescaleDB** | ratio **~6×** (append-only, chunks > 7 j) |
-| **Tests** | **68** tests unitaires, CI verte |
+| **Tests** | **105** tests automatises, CI verte |
 
 ## 4. Messages clés à défendre devant le jury
 
@@ -78,7 +78,7 @@ pour un surcoût de faux positifs **modeste** (+0.16 FP/h).
 
 - **Reproductibilité** : `docker compose up` reconstruit toute la plateforme ; `scripts/demo.sh`
   rejoue la démo bout-en-bout.
-- **Tests + CI** : 68 tests unitaires (logique pure), GitHub Actions à chaque push.
+- **Tests + CI** : 105 tests automatises, GitHub Actions à chaque push.
 - **Observabilité de la plateforme** : dashboard self-observabilité + **`/metrics` Prometheus natif**
   du détecteur (durée de cycle p95 ~47 ms, alertes par état, taux LLM, fraîcheur).
 - **Dette maîtrisée** : compression + rétention TimescaleDB (~6×), pas de croissance illimitée.

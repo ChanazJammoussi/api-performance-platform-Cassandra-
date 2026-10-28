@@ -56,6 +56,9 @@ CYCLE_SECONDS = Histogram(
 )
 ENDPOINTS_WITH_FEATURES = Gauge(
     "cassandra_detector_endpoints_with_features", "Endpoints ayant des features disponibles dans endpoint_features")
+ENDPOINTS_STALE = Gauge(
+    "cassandra_detector_endpoints_stale",
+    "Endpoints dont la derniere mesure est perimee (non traitee, automate fige)")
 ALERTS_STATE = Gauge(
     "cassandra_detector_alerts", "Alertes par etat", labelnames=["state"])
 ANOMALY_WRITES = Counter(

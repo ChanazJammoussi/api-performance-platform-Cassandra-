@@ -434,3 +434,24 @@ def test_candidat_illisible(tmp_path):
     bad.write_bytes(b"pas un modele")
     res, _ = _evaluate(tmp_path / "c", candidate_path=bad)
     assert res["officiel"]["N"]["statut"] == "incompatible"
+
+
+# --- mode saisonnier (season.py) ------------------------------------------------
+
+import season  # noqa: E402
+
+
+def test_mode_et_case_saisonniere_affiches(tmp_path):
+    res, _ = _evaluate(tmp_path)
+    assert res["mode_saisonnier"] == {"mode": "reel"}
+    assert [f["case_saisonniere"] for f in res["diagnostic"]["fenetres"]] == [[4, 8], [4, 9]]
+
+
+def test_campagne_d_un_autre_mode_refusee_sans_requete(tmp_path, monkeypatch):
+    d = make_eval_campaign(tmp_path)                      # campagne en mode reel
+    monkeypatch.setattr(season, "MODE", season.COMPRESSE)
+    conn = GuardConn(feature_rows())
+    res = ev.evaluate_campaign(conn, d)
+    assert res["statut"] == "campagne_invalide" and res["officiel"] is None
+    assert any("mode saisonnier" in r for r in res["raisons"])
+    assert conn.sql == []

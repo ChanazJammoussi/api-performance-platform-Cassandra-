@@ -43,6 +43,7 @@ import joblib
 import psycopg2
 
 import ml_model
+import season
 import validation_checks as vc
 from features import compute_features, vectorize, direction_of, WINDOW_SIZE, MIN_WINDOW
 from baseline_utils import compute_deviation, pg_dow, ENDPOINT_SLOS, DEFAULT_SLOS
@@ -573,6 +574,9 @@ def _window_diagnostics(windows, coverage, metric_cov, completeness, fallback, n
             "contexte": cov["context_points"], "pendant": cov["during_points"],
             "attendus": cov["expected_points"], "completude": cov["completeness"],
             "plus_grand_ecart_s": cov["max_gap_s"],
+            # Case saisonniere (dow, heure) au debut de la panne : en mode compresse,
+            # heure simulee de load.js (creux / pic de charge).
+            "case_saisonniere": list(season.slot(w["injected"])),
             "creneaux_secours": {m: fb["metrics"][m]["creneaux_secours"] for m in BASELINE_METRICS},
             "baseline": comp["metrics"],
         })
@@ -591,7 +595,7 @@ def evaluate_campaign(conn, campaign_dir, *, candidate_path=None):
                    resultats PARTIELS sur les fenetres evaluables -- jamais officiels
     """
     res = {"campagne": str(campaign_dir), "statut": None, "raisons": [],
-           "officiel": None, "diagnostic": {}}
+           "officiel": None, "diagnostic": {}, "mode_saisonnier": season.describe()}
     diag = res["diagnostic"]
     chk = vc.check_campaign(campaign_dir, require_completed=True, features_py=FEATURES_PY)
     manifest = chk["manifest"] or {}
@@ -703,6 +707,7 @@ def _print_config(name, c):
 
 def print_campaign_result(res):
     print(f"Campagne : {res['campagne']}")
+    print(f"Mode     : {res.get('mode_saisonnier')}")
     print(f"Statut   : {res['statut']}")
     if res["officiel"]:
         o = res["officiel"]
@@ -722,7 +727,7 @@ def print_campaign_result(res):
             etat = "evaluable" if f["evaluable_SB"] else "NON evaluable"
             print(f"  {f['source']:<40} {f['fault_type']:<16} {etat:<14} "
                   f"pendant {f['pendant']}/{f['attendus']}  ecart max {f['plus_grand_ecart_s']} s  "
-                  f"secours {sum(f['creneaux_secours'].values())}")
+                  f"secours {sum(f['creneaux_secours'].values())}  case {f.get('case_saisonniere')}")
             for r in f["raisons_SB"]:
                 print(f"      - {r}")
         print(f"  heures observables hors panne : {d.get('heures_observables_hors_panne', 0):.2f}")

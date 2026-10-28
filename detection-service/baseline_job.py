@@ -23,6 +23,8 @@ from datetime import datetime, timezone, timedelta
 
 import psycopg2
 
+import season
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
@@ -90,8 +92,8 @@ INSERT INTO endpoint_baseline
 SELECT
     endpoint_id,
     %(metric)s                                          AS metric,
-    EXTRACT(DOW FROM time)::smallint                    AS dow,
-    EXTRACT(HOUR FROM time)::smallint                   AS hour_bucket,
+    {dow_sql}                    AS dow,
+    {hour_sql}                   AS hour_bucket,
     percentile_cont(0.10) WITHIN GROUP (ORDER BY {col}) AS p10,
     percentile_cont(0.50) WITHIN GROUP (ORDER BY {col}) AS p50,
     percentile_cont(0.90) WITHIN GROUP (ORDER BY {col}) AS p90,
@@ -120,19 +122,27 @@ DO UPDATE SET
 """
 
 
+def build_upsert_sql(col, mode=None):
+    """UPSERT d'une metrique ; cases (dow, hour_bucket) de l'horloge season (spec 5.3)."""
+    dow_sql, hour_sql = season.sql_slot("time", mode)
+    return UPSERT_SQL.format(
+        col=col,
+        days=LOOKBACK_DAYS,
+        min_samples=MIN_SAMPLES,
+        dow_sql=dow_sql,
+        hour_sql=hour_sql,
+    )
+
+
 def run_baseline(conn):
     cur = conn.cursor()
     total_upserted = 0
 
     win_starts, win_ends = load_injection_windows()
-    log.info(f"Fenetres d'injection exclues : {len(win_starts)}")
+    log.info(f"Fenetres d'injection exclues : {len(win_starts)}  mode saisonnier : {season.MODE}")
 
     for metric, col in METRICS.items():
-        sql = UPSERT_SQL.format(
-            col=col,
-            days=LOOKBACK_DAYS,
-            min_samples=MIN_SAMPLES,
-        )
+        sql = build_upsert_sql(col)
         cur.execute(sql, {"metric": metric, "win_starts": win_starts, "win_ends": win_ends})
         upserted = cur.rowcount
         total_upserted += upserted

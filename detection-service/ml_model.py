@@ -16,7 +16,8 @@ Responsabilites :
 Format artefact (joblib) : {"model": IsolationForest, "meta": {...}}.
 meta contient feature_names, trained_at, n_samples, contamination, window_size,
 calibration (percentiles du score brut), feature_medians (pour l'attribution),
-lookback_days, sklearn_version.
+lookback_days, sklearn_version, season (mode de l'horloge saisonniere, season.py ;
+absent = artefact anterieur, considere comme mode reel).
 """
 
 import os
@@ -29,6 +30,7 @@ import sklearn
 from sklearn.ensemble import IsolationForest
 
 from features import FEATURE_NAMES
+import season
 
 log = logging.getLogger(__name__)
 
@@ -222,7 +224,8 @@ def check_bundle_compat(bundle):
     """
     Liste des problemes de compatibilite d'un artefact {model, meta} avec le code
     actuel (vide = compatible) : feature_names identiques a FEATURE_NAMES (noms ET
-    ordre), model.n_features_in_, calibration p50/p99 finie, feature_medians.
+    ordre), model.n_features_in_, calibration p50/p99 finie, feature_medians,
+    mode saisonnier identique au mode actuel (season.describe()).
     """
     if not isinstance(bundle, dict) or "model" not in bundle or "meta" not in bundle:
         return ["structure : dict {model, meta} attendu"]
@@ -251,6 +254,11 @@ def check_bundle_compat(bundle):
         medians_ok = False
     if not medians_ok:
         problems.append(f"meta.feature_medians : {len(FEATURE_NAMES)} valeurs finies requises")
+    # Un modele entraine sur une autre horloge saisonniere (baseline differente) est
+    # refuse : pas de melange mode reel / journee compressee.
+    if not season.same_mode(meta.get("season"), season.describe()):
+        problems.append(f"meta.season {meta.get('season')!r} different du mode actuel "
+                        f"{season.describe()!r}")
     return problems
 
 
@@ -386,4 +394,5 @@ def build_meta(trained_at, X, contamination, window_size, lookback_days):
         "lookback_days": int(lookback_days),
         "feature_medians": [float(m) for m in np.median(np.asarray(X), axis=0)],
         "sklearn_version": sklearn.__version__,
+        "season": season.describe(),
     }
